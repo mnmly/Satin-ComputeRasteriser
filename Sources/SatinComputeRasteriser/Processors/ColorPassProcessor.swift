@@ -1,0 +1,34 @@
+import Metal
+import Satin
+import simd
+
+open class ColorPassProcessor: DepthPassProcessor {
+    public var depthTolerance: Float = 0.01 {
+        didSet { set("depthTolerance", depthTolerance) }
+    }
+
+    public var colorizeChunks: Bool = false {
+        didSet { set("colorizeChunks", colorizeChunks ? 1 : 0) }
+    }
+
+    public var colorizeOverdraw: Bool = false {
+        didSet { set("colorizeOverdraw", colorizeOverdraw ? 1 : 0) }
+    }
+
+    public var colorsBuffer: MTLBuffer? { didSet { set(colorsBuffer, index: .Custom6) } }
+
+    open override func setup() {
+        super.setup()
+        set("depthTolerance", depthTolerance)
+        set("colorizeChunks", colorizeChunks ? 1 : 0)
+        set("colorizeOverdraw", colorizeOverdraw ? 1 : 0)
+    }
+
+    open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
+        encodeIfReady(
+            commandBuffer,
+            isReady: batchCount > 0 && screenSize.x > 0 && screenSize.y > 0 && batchesBuffer != nil && colorsBuffer != nil && pixelBuffer != nil
+        )
+    }
+}
+

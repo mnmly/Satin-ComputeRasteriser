@@ -1,0 +1,19 @@
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.profraw
+
+# Example app local builds
+Examples/**/.build/
+
+# Editor / local environment
+.vscode/
+.idea/
