@@ -10,6 +10,7 @@ struct CullUniforms {
     float4x4 projectionMatrix;
     int batchCount;
     int enableFrustumCulling;
+    int lodBias;
 };
 
 kernel void cullUpdate(
@@ -36,7 +37,15 @@ kernel void cullUpdate(
     }
 
     const int level = precisionLevel(batch, file, uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+    // Map projected-precision tier to a max LOD that should still render.
+    // Tier 0 (very close) and 1 (moderately close) show all levels.
+    // Tiers 2-4 progressively drop the finest levels.
+    constexpr int lodForPrecision[5] = { 7, 7, 3, 2, 1 };
+    const int tier = clamp(level, 0, 4);
+    const int lodThreshold = max(0, lodForPrecision[tier] + uniforms.lodBias);
     const uint slot = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
     visible[slot].batchIndex = gid;
     visible[slot].level = level;
+    visible[slot].lodThreshold = lodThreshold;
+    visible[slot].padding = 0u;
 }

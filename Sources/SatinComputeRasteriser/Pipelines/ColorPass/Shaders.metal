@@ -21,8 +21,9 @@ kernel void colorPassUpdate(
     device const uint *xyzHigh [[buffer(ComputeBufferCustom3)]],
     device const RasterFile *files [[buffer(ComputeBufferCustom4)]],
     device RasterPixel *pixels [[buffer(ComputeBufferCustom5)]],
-    device const uint *colors [[buffer(ComputeBufferCustom6)]],
+    device const uchar *levels [[buffer(ComputeBufferCustom6)]],
     device const VisibleBatch *visible [[buffer(ComputeBufferCustom7)]],
+    device const uint *colors [[buffer(ComputeBufferCustom9)]],
     uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
@@ -31,6 +32,7 @@ kernel void colorPassUpdate(
     const RasterBatch batch = batches[batchIndex];
     const RasterFile file = files[batch.fileIndex];
     const int level = vb.level;
+    const uint lodThreshold = uint(vb.lodThreshold);
     const uint pointsPerThread = (batch.numPoints + CR_THREADS_PER_GROUP - 1u) / CR_THREADS_PER_GROUP;
 
     for (uint i = 0; i < pointsPerThread; i++) {
@@ -40,6 +42,10 @@ kernel void colorPassUpdate(
         }
 
         const uint pointIndex = batch.firstPoint + localIndex;
+        const uint pointLevel = uint(levels[pointIndex]) & 0x7u;
+        if (pointLevel > lodThreshold) {
+            continue;
+        }
         const float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
         float4 clip = file.transform * float4(point, 1.0);
         if (clip.w <= 0.0) {

@@ -19,7 +19,7 @@ import Testing
     let centerPixel = 1 * 4 + 2
 
     #expect(result.indices[centerPixel] == 1)
-    #expect(result.colorBuffer(from: packed.colors)[centerPixel] == 0x0000ff00)
+    #expect(result.colorBuffer(from: packed.colors)[centerPixel] == 0xff00ff00)
 }
 
 @Test func nearestPointReferenceKeepsLowestPointIndexOnDepthTie() {
@@ -39,7 +39,7 @@ import Testing
     let centerPixel = 1 * 4 + 2
 
     #expect(result.indices[centerPixel] == 0)
-    #expect(result.colorBuffer(from: packed.colors)[centerPixel] == 0x000000ff)
+    #expect(result.colorBuffer(from: packed.colors)[centerPixel] == 0xff0000ff)
 }
 
 @Test func nearestPointReferenceRejectsBackgroundAndOutOfClipPoints() {

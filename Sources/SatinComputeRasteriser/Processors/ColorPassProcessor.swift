@@ -15,7 +15,7 @@ open class ColorPassProcessor: DepthPassProcessor {
         didSet { set("colorizeOverdraw", colorizeOverdraw ? 1 : 0) }
     }
 
-    public var colorsBuffer: MTLBuffer? { didSet { set(colorsBuffer, index: .Custom6) } }
+    public var colorsBuffer: MTLBuffer? { didSet { set(colorsBuffer, index: .Custom9) } }
 
     open override func setup() {
         super.setup()
@@ -32,6 +32,7 @@ open class ColorPassProcessor: DepthPassProcessor {
                 && batchesBuffer != nil
                 && colorsBuffer != nil
                 && pixelBuffer != nil
+                && levelsBuffer != nil
                 && visibleBatchesBuffer != nil
                 && indirectArgsBuffer != nil
         )

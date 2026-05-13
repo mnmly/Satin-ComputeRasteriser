@@ -8,7 +8,7 @@ open class NearestIndexProcessor: DepthPassProcessor {
     }
 
     public var indexBuffer: MTLBuffer? {
-        didSet { set(indexBuffer, index: .Custom6) }
+        didSet { set(indexBuffer, index: .Custom8) }
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
@@ -19,6 +19,7 @@ open class NearestIndexProcessor: DepthPassProcessor {
                 && batchesBuffer != nil
                 && depthBuffer != nil
                 && indexBuffer != nil
+                && levelsBuffer != nil
                 && visibleBatchesBuffer != nil
                 && indirectArgsBuffer != nil
         )

@@ -24,6 +24,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
     public var depthTolerance: Float
     public var backgroundColor: SIMD4<Float>
     public var enableFrustumCulling: Bool
+    public var lodBias: Int
     public var colorizeChunks: Bool
     public var colorizeOverdraw: Bool
     public var pointSizeMode: PointSizeMode
@@ -36,6 +37,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         depthTolerance: Float = 0.01,
         backgroundColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.0, 0.0, 0.0),
         enableFrustumCulling: Bool = true,
+        lodBias: Int = 0,
         colorizeChunks: Bool = false,
         colorizeOverdraw: Bool = false,
         pointSizeMode: PointSizeMode = .screenSpace,
@@ -47,6 +49,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.depthTolerance = depthTolerance
         self.backgroundColor = backgroundColor
         self.enableFrustumCulling = enableFrustumCulling
+        self.lodBias = lodBias
         self.colorizeChunks = colorizeChunks
         self.colorizeOverdraw = colorizeOverdraw
         self.pointSizeMode = pointSizeMode
@@ -144,6 +147,7 @@ public struct PackedPointCloud: Sendable {
     public var xyzMed: [UInt32]
     public var xyzHigh: [UInt32]
     public var colors: [UInt32]
+    public var levels: [UInt8]
     public var boundsMin: SIMD3<Float>
     public var boundsMax: SIMD3<Float>
 
@@ -157,6 +161,7 @@ public struct PackedPointCloud: Sendable {
         xyzMed: [UInt32],
         xyzHigh: [UInt32],
         colors: [UInt32],
+        levels: [UInt8],
         boundsMin: SIMD3<Float>,
         boundsMax: SIMD3<Float>
     ) {
@@ -166,6 +171,7 @@ public struct PackedPointCloud: Sendable {
         self.xyzMed = xyzMed
         self.xyzHigh = xyzHigh
         self.colors = colors
+        self.levels = levels
         self.boundsMin = boundsMin
         self.boundsMax = boundsMax
     }
@@ -174,10 +180,14 @@ public struct PackedPointCloud: Sendable {
 public struct VisibleBatch: Sendable {
     public var batchIndex: UInt32
     public var level: Int32
+    public var lodThreshold: Int32
+    public var padding: UInt32
 
-    public init(batchIndex: UInt32 = 0, level: Int32 = 0) {
+    public init(batchIndex: UInt32 = 0, level: Int32 = 0, lodThreshold: Int32 = 0) {
         self.batchIndex = batchIndex
         self.level = level
+        self.lodThreshold = lodThreshold
+        self.padding = 0
     }
 }
 

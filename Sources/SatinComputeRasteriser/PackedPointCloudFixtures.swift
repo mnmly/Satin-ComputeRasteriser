@@ -24,10 +24,15 @@ public enum PackedPointCloudFixtures {
         return pack(positions: positions, colors: colors)
     }
 
+    public static let defaultLODLevels: Int = 4
+    public static let defaultCoarseVoxelDivisions: Int = 64
+
     public static func pack(
         positions: [SIMD3<Float>],
         colors: [SIMD4<Float>],
-        pointsPerBatch: Int = computeRasteriserThreadsPerGroup * 80
+        pointsPerBatch: Int = computeRasteriserThreadsPerGroup * 80,
+        lodLevels: Int = defaultLODLevels,
+        coarseVoxelDivisions: Int = defaultCoarseVoxelDivisions
     ) -> PackedPointCloud {
         precondition(positions.count == colors.count, "positions and colors must have the same count")
         guard !positions.isEmpty else {
@@ -38,6 +43,7 @@ public enum PackedPointCloudFixtures {
                 xyzMed: [],
                 xyzHigh: [],
                 colors: [],
+                levels: [],
                 boundsMin: .zero,
                 boundsMax: .zero
             )
@@ -53,6 +59,13 @@ public enum PackedPointCloudFixtures {
         let order = mortonOrder(positions: positions, boundsMin: boundsMin, boundsMax: boundsMax)
         let sortedPositions = order.map { positions[$0] }
         let sortedColorsSrc = order.map { colors[$0] }
+        let levels = computeLODLevels(
+            positions: sortedPositions,
+            boundsMin: boundsMin,
+            boundsMax: boundsMax,
+            lodLevels: max(1, min(lodLevels, 8)),
+            coarseVoxelDivisions: max(1, coarseVoxelDivisions)
+        )
 
         var batches: [RasterBatch] = []
         var xyzLow = Array(repeating: UInt32(0), count: sortedPositions.count)
@@ -112,7 +125,8 @@ public enum PackedPointCloudFixtures {
             let r = UInt32(simd_clamp(color.x, 0.0, 1.0) * 255.0)
             let g = UInt32(simd_clamp(color.y, 0.0, 1.0) * 255.0)
             let b = UInt32(simd_clamp(color.z, 0.0, 1.0) * 255.0)
-            return r | (g << 8) | (b << 16)
+            let a = UInt32(simd_clamp(color.w, 0.0, 1.0) * 255.0)
+            return r | (g << 8) | (b << 16) | (a << 24)
         }
 
         return PackedPointCloud(
@@ -122,6 +136,7 @@ public enum PackedPointCloudFixtures {
             xyzMed: xyzMed,
             xyzHigh: xyzHigh,
             colors: packedColors,
+            levels: levels,
             boundsMin: boundsMin,
             boundsMax: boundsMax
         )
@@ -152,6 +167,43 @@ private func mortonOrder(
     var indices = Array(0 ..< count)
     indices.sort { keys[$0] < keys[$1] }
     return indices
+}
+
+// Density-aware LOD: for each level (coarsest first) assign points that
+// occupy a previously-empty voxel. Coarsest level gets the most spatially
+// representative subset; finest level catches the remainder. Levels stored
+// in top 3 bits of the packed color word (0 = coarsest visible at distance).
+private func computeLODLevels(
+    positions: [SIMD3<Float>],
+    boundsMin: SIMD3<Float>,
+    boundsMax: SIMD3<Float>,
+    lodLevels: Int,
+    coarseVoxelDivisions: Int
+) -> [UInt8] {
+    let count = positions.count
+    let maxLevel = UInt8(lodLevels - 1)
+    var levels = [UInt8](repeating: maxLevel, count: count)
+    guard lodLevels > 1 else { return levels }
+
+    let extent = simd_max(boundsMax - boundsMin, SIMD3<Float>(repeating: 0.000001))
+    let longestAxis = max(extent.x, max(extent.y, extent.z))
+    let baseVoxel = longestAxis / Float(coarseVoxelDivisions)
+
+    var occupied: Set<SIMD3<Int32>> = []
+    for level in 0 ..< (lodLevels - 1) {
+        let voxelSize = baseVoxel * powf(0.5, Float(level))
+        let invVoxel = 1.0 / max(voxelSize, 0.000001)
+        occupied.removeAll(keepingCapacity: true)
+        for i in 0 ..< count {
+            if levels[i] != maxLevel { continue }
+            let local = (positions[i] - boundsMin) * invVoxel
+            let cell = SIMD3<Int32>(Int32(local.x.rounded(.down)), Int32(local.y.rounded(.down)), Int32(local.z.rounded(.down)))
+            if occupied.insert(cell).inserted {
+                levels[i] = UInt8(level)
+            }
+        }
+    }
+    return levels
 }
 
 private func mortonSpread10(_ value: UInt32) -> UInt32 {

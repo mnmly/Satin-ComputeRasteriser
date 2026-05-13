@@ -12,6 +12,9 @@ public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var minimumPointSize: Float = 1.0
     @Published public var maximumPointSize: Float = 5.0
     @Published public var pointSizeScale: Float = 5.0
+    @Published public var lodBias: Int = 0
+    @Published public var enableFrustumCulling: Bool = true
+    @Published public var colorizeChunks: Bool = false
 
     public init() {}
 }
@@ -55,6 +58,9 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.configuration.minimumPointSize = appState.minimumPointSize
         rasteriser.configuration.maximumPointSize = appState.maximumPointSize
         rasteriser.configuration.pointSizeScale = appState.pointSizeScale
+        rasteriser.configuration.lodBias = appState.lodBias
+        rasteriser.configuration.enableFrustumCulling = appState.enableFrustumCulling
+        rasteriser.configuration.colorizeChunks = appState.colorizeChunks
         camera.lookAt(target: .zero)
         cameraController = PerspectiveCameraController(camera: camera, view: metalView)
         cameraController?.defaultDistance = 2.4
@@ -112,6 +118,27 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
             DispatchQueue.main.async { [appState] in
                 appState.errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    public func setLODBias(_ bias: Int) {
+        rasteriser.configuration.lodBias = bias
+        DispatchQueue.main.async { [appState] in
+            appState.lodBias = bias
+        }
+    }
+
+    public func setFrustumCulling(_ enabled: Bool) {
+        rasteriser.configuration.enableFrustumCulling = enabled
+        DispatchQueue.main.async { [appState] in
+            appState.enableFrustumCulling = enabled
+        }
+    }
+
+    public func setColorizeChunks(_ enabled: Bool) {
+        rasteriser.configuration.colorizeChunks = enabled
+        DispatchQueue.main.async { [appState] in
+            appState.colorizeChunks = enabled
         }
     }
 

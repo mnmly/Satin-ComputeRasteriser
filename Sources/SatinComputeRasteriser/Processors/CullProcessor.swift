@@ -23,6 +23,10 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
         didSet { set("enableFrustumCulling", enableFrustumCulling ? 1 : 0) }
     }
 
+    public var lodBias: Int = 0 {
+        didSet { set("lodBias", lodBias) }
+    }
+
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
     public var filesBuffer: MTLBuffer? { didSet { set(filesBuffer, index: .Custom1) } }
     public var visibleBuffer: MTLBuffer? { didSet { set(visibleBuffer, index: .Custom2) } }
@@ -35,6 +39,7 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
         set("viewMatrix", viewMatrix)
         set("projectionMatrix", projectionMatrix)
         set("enableFrustumCulling", enableFrustumCulling ? 1 : 0)
+        set("lodBias", lodBias)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {

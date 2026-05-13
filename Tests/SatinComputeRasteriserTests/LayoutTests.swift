@@ -6,6 +6,7 @@ import Testing
     #expect(ComputeRasteriserLayout.rasterBatchStride == 64)
     #expect(ComputeRasteriserLayout.rasterFileStride == 256)
     #expect(ComputeRasteriserLayout.rasterPixelStride == 48)
+    #expect(ComputeRasteriserLayout.visibleBatchStride == 16)
     #expect(MemoryLayout<UInt64>.stride == 8)
 }
 
@@ -40,8 +41,44 @@ import Testing
     let packed = try PLYPointCloudLoader.parse(Data(ply.utf8), pointsPerBatch: 2)
     #expect(packed.pointCount == 3)
     #expect(packed.batchCount == 2)
-    let colorSet = Set(packed.colors)
-    #expect(colorSet == [0x000000ff, 0x0000ff00, 0x00ff0000])
+    let rgb = Set(packed.colors.map { $0 & 0x00ffffff })
+    #expect(rgb == [0x000000ff, 0x0000ff00, 0x00ff0000])
+    #expect(packed.levels.count == 3)
+}
+
+@Test func packAssignsLODLevelsInSeparateBufferAndCoversAllPoints() {
+    var positions: [SIMD3<Float>] = []
+    var colors: [SIMD4<Float>] = []
+    for z in 0 ..< 8 {
+        for y in 0 ..< 8 {
+            for x in 0 ..< 8 {
+                positions.append(SIMD3<Float>(Float(x), Float(y), Float(z)))
+                colors.append(SIMD4<Float>(1, 1, 1, 1))
+            }
+        }
+    }
+
+    let packed = PackedPointCloudFixtures.pack(
+        positions: positions,
+        colors: colors,
+        pointsPerBatch: 128,
+        lodLevels: 4,
+        coarseVoxelDivisions: 2
+    )
+
+    #expect(packed.levels.count == positions.count)
+    var levelCounts = [Int](repeating: 0, count: 8)
+    for level in packed.levels {
+        levelCounts[Int(level)] += 1
+    }
+    let assigned = levelCounts[0] + levelCounts[1] + levelCounts[2] + levelCounts[3]
+    #expect(assigned == positions.count)
+    #expect(levelCounts[0] > 0)
+    #expect(levelCounts[0] < positions.count)
+
+    for c in packed.colors {
+        #expect(c >> 24 == 0xff)
+    }
 }
 
 @Test func packPreservesPointCountAndColorMultisetUnderMortonOrdering() {
@@ -65,11 +102,11 @@ import Testing
     #expect(packed.batchCount == 3)
 
     let expected: [UInt32: Int] = [
-        0x000000ff: 1,
-        0x0000ff00: 1,
-        0x00ff0000: 1,
-        0x0000ffff: 1,
-        0x00ffffff: 1,
+        0xff0000ff: 1,
+        0xff00ff00: 1,
+        0xffff0000: 1,
+        0xff00ffff: 1,
+        0xffffffff: 1,
     ]
     var actual: [UInt32: Int] = [:]
     for c in packed.colors { actual[c, default: 0] += 1 }

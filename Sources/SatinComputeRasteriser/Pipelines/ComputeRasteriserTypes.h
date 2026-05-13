@@ -46,6 +46,8 @@ typedef struct {
 typedef struct {
     uint batchIndex;
     int level;
+    int lodThreshold;
+    uint padding;
 } VisibleBatch;
 
 typedef struct {

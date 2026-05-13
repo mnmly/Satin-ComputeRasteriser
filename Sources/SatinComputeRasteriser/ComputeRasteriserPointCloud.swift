@@ -11,6 +11,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public private(set) var xyzMedBuffer: MTLBuffer?
     public private(set) var xyzHighBuffer: MTLBuffer?
     public private(set) var colorsBuffer: MTLBuffer?
+    public private(set) var levelsBuffer: MTLBuffer?
     public private(set) var visibleBatchesBuffer: MTLBuffer?
     public private(set) var cullCounterBuffer: MTLBuffer?
     public private(set) var cullIndirectArgsBuffer: MTLBuffer?
@@ -56,6 +57,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         xyzMedBuffer = makeBuffer(packed.xyzMed, label: "\(label).XYZMed")
         xyzHighBuffer = makeBuffer(packed.xyzHigh, label: "\(label).XYZHigh")
         colorsBuffer = makeBuffer(packed.colors, label: "\(label).Colors")
+        levelsBuffer = makeBuffer(packed.levels, label: "\(label).Levels")
         rebuildCullBuffers()
     }
 
