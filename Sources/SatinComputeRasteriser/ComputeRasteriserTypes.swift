@@ -171,8 +171,32 @@ public struct PackedPointCloud: Sendable {
     }
 }
 
+public struct VisibleBatch: Sendable {
+    public var batchIndex: UInt32
+    public var level: Int32
+
+    public init(batchIndex: UInt32 = 0, level: Int32 = 0) {
+        self.batchIndex = batchIndex
+        self.level = level
+    }
+}
+
+public struct CRDispatchArgs: Sendable {
+    public var threadgroupsX: UInt32
+    public var threadgroupsY: UInt32
+    public var threadgroupsZ: UInt32
+
+    public init(threadgroupsX: UInt32 = 0, threadgroupsY: UInt32 = 1, threadgroupsZ: UInt32 = 1) {
+        self.threadgroupsX = threadgroupsX
+        self.threadgroupsY = threadgroupsY
+        self.threadgroupsZ = threadgroupsZ
+    }
+}
+
 public enum ComputeRasteriserLayout {
     public static let rasterBatchStride = MemoryLayout<RasterBatch>.stride
     public static let rasterFileStride = MemoryLayout<RasterFile>.stride
     public static let rasterPixelStride = MemoryLayout<RasterPixel>.stride
+    public static let visibleBatchStride = MemoryLayout<VisibleBatch>.stride
+    public static let dispatchArgsStride = MemoryLayout<CRDispatchArgs>.stride
 }

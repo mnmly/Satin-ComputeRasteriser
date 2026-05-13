@@ -27,8 +27,13 @@ open class ColorPassProcessor: DepthPassProcessor {
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
         encodeIfReady(
             commandBuffer,
-            isReady: batchCount > 0 && screenSize.x > 0 && screenSize.y > 0 && batchesBuffer != nil && colorsBuffer != nil && pixelBuffer != nil
+            isReady: screenSize.x > 0
+                && screenSize.y > 0
+                && batchesBuffer != nil
+                && colorsBuffer != nil
+                && pixelBuffer != nil
+                && visibleBatchesBuffer != nil
+                && indirectArgsBuffer != nil
         )
     }
 }
-

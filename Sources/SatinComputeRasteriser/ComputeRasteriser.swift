@@ -20,6 +20,8 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private var scaleFactor: Float = 1.0
 
     private lazy var clearProcessor = ClearProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
+    private lazy var cullProcessor = CullProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
+    private lazy var cullFinalizeProcessor = CullFinalizeProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var depthProcessor = DepthPassProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var colorProcessor = ColorPassProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var resolveProcessor = ResolveProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
@@ -96,41 +98,21 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         let viewProjection = camera.projectionMatrix * camera.viewMatrix
         let screenSize = SIMD2<UInt32>(UInt32(max(viewport.z, 0)), UInt32(max(viewport.w, 0)))
 
-        depthProcessor.screenSize = screenSize
-        depthProcessor.viewMatrix = camera.viewMatrix
-        depthProcessor.projectionMatrix = camera.projectionMatrix
-        depthProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        depthProcessor.pointSizeMode = configuration.pointSizeMode
-        depthProcessor.minimumPointSize = configuration.minimumPointSize
-        depthProcessor.maximumPointSize = configuration.maximumPointSize
-        depthProcessor.pointSizeScale = configuration.pointSizeScale
+        cullProcessor.screenSize = screenSize
+        cullProcessor.viewMatrix = camera.viewMatrix
+        cullProcessor.projectionMatrix = camera.projectionMatrix
+        cullProcessor.enableFrustumCulling = configuration.enableFrustumCulling
 
-        nearestDepthProcessor.screenSize = screenSize
-        nearestDepthProcessor.viewMatrix = camera.viewMatrix
-        nearestDepthProcessor.projectionMatrix = camera.projectionMatrix
-        nearestDepthProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        nearestDepthProcessor.pointSizeMode = configuration.pointSizeMode
-        nearestDepthProcessor.minimumPointSize = configuration.minimumPointSize
-        nearestDepthProcessor.maximumPointSize = configuration.maximumPointSize
-        nearestDepthProcessor.pointSizeScale = configuration.pointSizeScale
+        for processor in [depthProcessor, nearestDepthProcessor, nearestIndexProcessor, colorProcessor] {
+            processor.screenSize = screenSize
+            processor.viewMatrix = camera.viewMatrix
+            processor.projectionMatrix = camera.projectionMatrix
+            processor.pointSizeMode = configuration.pointSizeMode
+            processor.minimumPointSize = configuration.minimumPointSize
+            processor.maximumPointSize = configuration.maximumPointSize
+            processor.pointSizeScale = configuration.pointSizeScale
+        }
 
-        nearestIndexProcessor.screenSize = screenSize
-        nearestIndexProcessor.viewMatrix = camera.viewMatrix
-        nearestIndexProcessor.projectionMatrix = camera.projectionMatrix
-        nearestIndexProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        nearestIndexProcessor.pointSizeMode = configuration.pointSizeMode
-        nearestIndexProcessor.minimumPointSize = configuration.minimumPointSize
-        nearestIndexProcessor.maximumPointSize = configuration.maximumPointSize
-        nearestIndexProcessor.pointSizeScale = configuration.pointSizeScale
-
-        colorProcessor.screenSize = screenSize
-        colorProcessor.viewMatrix = camera.viewMatrix
-        colorProcessor.projectionMatrix = camera.projectionMatrix
-        colorProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        colorProcessor.pointSizeMode = configuration.pointSizeMode
-        colorProcessor.minimumPointSize = configuration.minimumPointSize
-        colorProcessor.maximumPointSize = configuration.maximumPointSize
-        colorProcessor.pointSizeScale = configuration.pointSizeScale
         colorProcessor.depthTolerance = configuration.depthTolerance
         colorProcessor.colorizeChunks = configuration.colorizeChunks
         colorProcessor.colorizeOverdraw = configuration.colorizeOverdraw
@@ -163,12 +145,12 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         clearProcessor.update(commandBuffer)
 
         for cloud in pointClouds where cloud.visible && cloud.batchCount > 0 {
+            guard runCullPass(commandBuffer, cloud: cloud) else { continue }
+
             bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
-            depthProcessor.batchCount = cloud.batchCount
             depthProcessor.update(commandBuffer)
 
             bind(cloud, to: colorProcessor, pixelBuffer: pixelBuffer)
-            colorProcessor.batchCount = cloud.batchCount
             colorProcessor.colorsBuffer = cloud.colorsBuffer
             colorProcessor.update(commandBuffer)
         }
@@ -189,13 +171,13 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         clearWinnerProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
         clearWinnerProcessor.update(commandBuffer)
 
+        guard runCullPass(commandBuffer, cloud: cloud) else { return }
+
         bind(cloud, to: nearestDepthProcessor, pixelBuffer: nearestDepthBuffer)
-        nearestDepthProcessor.batchCount = cloud.batchCount
         nearestDepthProcessor.update(commandBuffer)
 
         bind(cloud, to: nearestIndexProcessor, pixelBuffer: nearestDepthBuffer)
         nearestIndexProcessor.indexBuffer = nearestIndexBuffer
-        nearestIndexProcessor.batchCount = cloud.batchCount
         nearestIndexProcessor.update(commandBuffer)
 
         nearestResolveProcessor.depthBuffer = nearestDepthBuffer
@@ -203,6 +185,33 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestResolveProcessor.colorsBuffer = cloud.colorsBuffer
         nearestResolveProcessor.outputTexture = outputTexture
         nearestResolveProcessor.update(commandBuffer)
+    }
+
+    private func runCullPass(_ commandBuffer: MTLCommandBuffer, cloud: ComputeRasteriserPointCloud) -> Bool {
+        guard let visibleBuffer = cloud.visibleBatchesBuffer,
+              let counterBuffer = cloud.cullCounterBuffer,
+              let indirectArgsBuffer = cloud.cullIndirectArgsBuffer
+        else { return false }
+
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.label = "\(label).CullReset"
+            blit.fill(buffer: counterBuffer, range: 0 ..< counterBuffer.length, value: 0)
+            blit.fill(buffer: indirectArgsBuffer, range: 0 ..< indirectArgsBuffer.length, value: 0)
+            blit.endEncoding()
+        }
+
+        cullProcessor.batchCount = cloud.batchCount
+        cullProcessor.batchesBuffer = cloud.batchesBuffer
+        cullProcessor.filesBuffer = cloud.filesBuffer
+        cullProcessor.visibleBuffer = visibleBuffer
+        cullProcessor.counterBuffer = counterBuffer
+        cullProcessor.update(commandBuffer)
+
+        cullFinalizeProcessor.counterBuffer = counterBuffer
+        cullFinalizeProcessor.indirectArgsBuffer = indirectArgsBuffer
+        cullFinalizeProcessor.update(commandBuffer)
+
+        return true
     }
 
     public func draw(renderPassDescriptor: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer) {
@@ -218,6 +227,8 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         processor.xyzHighBuffer = cloud.xyzHighBuffer
         processor.filesBuffer = cloud.filesBuffer
         processor.pixelBuffer = pixelBuffer
+        processor.visibleBatchesBuffer = cloud.visibleBatchesBuffer
+        processor.indirectArgsBuffer = cloud.cullIndirectArgsBuffer
     }
 
     private func resizeResources() {
@@ -257,10 +268,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private func applyConfiguration() {
         resolveProcessor.backgroundColor = configuration.backgroundColor
         nearestResolveProcessor.backgroundColor = configuration.backgroundColor
-        depthProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        nearestDepthProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        nearestIndexProcessor.enableFrustumCulling = configuration.enableFrustumCulling
-        colorProcessor.enableFrustumCulling = configuration.enableFrustumCulling
+        cullProcessor.enableFrustumCulling = configuration.enableFrustumCulling
         for processor in [depthProcessor, nearestDepthProcessor, nearestIndexProcessor, colorProcessor] {
             processor.pointSizeMode = configuration.pointSizeMode
             processor.minimumPointSize = configuration.minimumPointSize

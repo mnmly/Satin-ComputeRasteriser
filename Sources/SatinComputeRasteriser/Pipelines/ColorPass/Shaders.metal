@@ -4,7 +4,6 @@ struct ColorPassUniforms {
     int2 screenSize;
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
-    int enableFrustumCulling;
     float depthTolerance;
     int colorizeChunks;
     int colorizeOverdraw;
@@ -23,19 +22,15 @@ kernel void colorPassUpdate(
     device const RasterFile *files [[buffer(ComputeBufferCustom4)]],
     device RasterPixel *pixels [[buffer(ComputeBufferCustom5)]],
     device const uint *colors [[buffer(ComputeBufferCustom6)]],
-    uint batchIndex [[threadgroup_position_in_grid]],
+    device const VisibleBatch *visible [[buffer(ComputeBufferCustom7)]],
+    uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
+    const VisibleBatch vb = visible[slot];
+    const uint batchIndex = vb.batchIndex;
     const RasterBatch batch = batches[batchIndex];
     const RasterFile file = files[batch.fileIndex];
-    const float3 wgMin = batchMin(batch);
-    const float3 wgMax = batchMax(batch);
-
-    if (uniforms.enableFrustumCulling != 0 && !intersectsFrustum(file.transformFrustum, wgMin, wgMax)) {
-        return;
-    }
-
-    const int level = precisionLevel(batch, file, uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+    const int level = vb.level;
     const uint pointsPerThread = (batch.numPoints + CR_THREADS_PER_GROUP - 1u) / CR_THREADS_PER_GROUP;
 
     for (uint i = 0; i < pointsPerThread; i++) {

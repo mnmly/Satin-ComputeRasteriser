@@ -46,6 +46,12 @@ The upstream project notes that some shader files adapt frustum-culling code fro
 
 Satin is used as the rendering, Metal view, scene graph, and compute processor framework.
 
+## Magnopus point-cloud rendering write-up
+
+The GPU batch-compaction + indirect-dispatch path (see `Pipelines/Cull` and `Pipelines/CullFinalize`) was prompted by Magnopus's blog post on rendering extremely large point clouds, which describes the same "amortise per-batch culling and precision selection across all consuming passes" pattern that upstream `compute_rasterizer` uses.
+
+- "How We Render Extremely Large Point Clouds": <https://www.magnopus.com/blog/how-we-render-extremely-large-point-clouds>
+
 ## Research References
 
 If you use this work in research or published material, cite the original compute rasterization papers:

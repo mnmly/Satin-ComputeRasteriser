@@ -43,4 +43,15 @@ typedef struct {
     uint3 padding;
 } RasterPixel;
 
+typedef struct {
+    uint batchIndex;
+    int level;
+} VisibleBatch;
+
+typedef struct {
+    uint threadgroupsX;
+    uint threadgroupsY;
+    uint threadgroupsZ;
+} CRDispatchArgs;
+
 #endif

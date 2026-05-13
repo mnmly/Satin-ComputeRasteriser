@@ -11,6 +11,9 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public private(set) var xyzMedBuffer: MTLBuffer?
     public private(set) var xyzHighBuffer: MTLBuffer?
     public private(set) var colorsBuffer: MTLBuffer?
+    public private(set) var visibleBatchesBuffer: MTLBuffer?
+    public private(set) var cullCounterBuffer: MTLBuffer?
+    public private(set) var cullIndirectArgsBuffer: MTLBuffer?
 
     public var batchCount: Int { packed.batchCount }
     public var pointCount: Int { packed.pointCount }
@@ -53,6 +56,31 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         xyzMedBuffer = makeBuffer(packed.xyzMed, label: "\(label).XYZMed")
         xyzHighBuffer = makeBuffer(packed.xyzHigh, label: "\(label).XYZHigh")
         colorsBuffer = makeBuffer(packed.colors, label: "\(label).Colors")
+        rebuildCullBuffers()
+    }
+
+    private func rebuildCullBuffers() {
+        guard packed.batchCount > 0 else {
+            visibleBatchesBuffer = nil
+            cullCounterBuffer = nil
+            cullIndirectArgsBuffer = nil
+            return
+        }
+        visibleBatchesBuffer = context.device.makeBuffer(
+            length: packed.batchCount * MemoryLayout<VisibleBatch>.stride,
+            options: .storageModePrivate
+        )
+        visibleBatchesBuffer?.label = "\(label).VisibleBatches"
+        cullCounterBuffer = context.device.makeBuffer(
+            length: MemoryLayout<UInt32>.stride,
+            options: .storageModePrivate
+        )
+        cullCounterBuffer?.label = "\(label).CullCounter"
+        cullIndirectArgsBuffer = context.device.makeBuffer(
+            length: MemoryLayout<CRDispatchArgs>.stride,
+            options: .storageModePrivate
+        )
+        cullIndirectArgsBuffer?.label = "\(label).CullIndirectArgs"
     }
 
     private func makeBuffer<T>(_ values: [T], label: String) -> MTLBuffer? {

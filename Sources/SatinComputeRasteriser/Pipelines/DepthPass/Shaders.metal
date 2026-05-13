@@ -4,7 +4,6 @@ struct DepthPassUniforms {
     int2 screenSize;
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
-    int enableFrustumCulling;
     int pointSizeMode;
     float minimumPointSize;
     float maximumPointSize;
@@ -19,19 +18,14 @@ kernel void depthPassUpdate(
     device const uint *xyzHigh [[buffer(ComputeBufferCustom3)]],
     device const RasterFile *files [[buffer(ComputeBufferCustom4)]],
     device RasterPixel *pixels [[buffer(ComputeBufferCustom5)]],
-    uint batchIndex [[threadgroup_position_in_grid]],
+    device const VisibleBatch *visible [[buffer(ComputeBufferCustom7)]],
+    uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
-    const RasterBatch batch = batches[batchIndex];
+    const VisibleBatch vb = visible[slot];
+    const RasterBatch batch = batches[vb.batchIndex];
     const RasterFile file = files[batch.fileIndex];
-    const float3 wgMin = batchMin(batch);
-    const float3 wgMax = batchMax(batch);
-
-    if (uniforms.enableFrustumCulling != 0 && !intersectsFrustum(file.transformFrustum, wgMin, wgMax)) {
-        return;
-    }
-
-    const int level = precisionLevel(batch, file, uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+    const int level = vb.level;
     const uint pointsPerThread = (batch.numPoints + CR_THREADS_PER_GROUP - 1u) / CR_THREADS_PER_GROUP;
 
     for (uint i = 0; i < pointsPerThread; i++) {
