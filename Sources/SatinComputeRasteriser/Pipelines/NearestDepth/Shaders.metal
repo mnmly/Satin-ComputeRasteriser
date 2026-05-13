@@ -5,6 +5,10 @@ struct NearestDepthUniforms {
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
     int enableFrustumCulling;
+    int pointSizeMode;
+    float minimumPointSize;
+    float maximumPointSize;
+    float pointSizeScale;
 };
 
 kernel void nearestDepthUpdate(
@@ -54,8 +58,29 @@ kernel void nearestDepthUpdate(
         }
         pixelCoord.y = uniforms.screenSize.y - 1 - pixelCoord.y;
 
-        const uint pixelIndex = uint(pixelCoord.y * uniforms.screenSize.x + pixelCoord.x);
         const uint depth = depthToUintReverseZ(ndc.z);
-        atomic_fetch_max_explicit(&depths[pixelIndex], depth, memory_order_relaxed);
+        const int radius = pointFootprintRadius(
+            point, file,
+            uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
+            uniforms.pointSizeMode,
+            uniforms.minimumPointSize, uniforms.maximumPointSize, uniforms.pointSizeScale
+        );
+
+        for (int oy = -radius; oy <= radius; oy++) {
+            for (int ox = -radius; ox <= radius; ox++) {
+                const int2 offset = int2(ox, oy);
+                if (!insidePointFootprint(offset, radius)) {
+                    continue;
+                }
+
+                const int2 target = pixelCoord + offset;
+                if (target.x < 0 || target.x >= uniforms.screenSize.x || target.y < 0 || target.y >= uniforms.screenSize.y) {
+                    continue;
+                }
+
+                const uint pixelIndex = uint(target.y * uniforms.screenSize.x + target.x);
+                atomic_fetch_max_explicit(&depths[pixelIndex], depth, memory_order_relaxed);
+            }
+        }
     }
 }

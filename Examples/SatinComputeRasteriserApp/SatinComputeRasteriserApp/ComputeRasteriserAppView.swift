@@ -29,6 +29,25 @@ public struct ComputeRasteriserAppView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 150)
+                Picker("Size Mode", selection: Binding(
+                    get: { appState.pointSizeMode },
+                    set: { renderer.setPointSizing(mode: $0) }
+                )) {
+                    Text("Screen").tag(PointSizeMode.screenSpace)
+                    Text("World").tag(PointSizeMode.worldSpace)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 150)
+                Slider(value: Binding(
+                    get: { Double(appState.maximumPointSize) },
+                    set: { renderer.setPointSizing(maximum: Float($0)) }
+                ), in: 1 ... 128)
+                .frame(width: 110)
+                Slider(value: Binding(
+                    get: { Double(appState.pointSizeScale) },
+                    set: { renderer.setPointSizing(scale: Float($0)) }
+                ), in: appState.pointSizeMode == .worldSpace ? 0.001 ... 0.1 : 1 ... 16)
+                .frame(width: 110)
                 Text(appState.status)
                     .lineLimit(1)
                 if let error = appState.errorMessage {

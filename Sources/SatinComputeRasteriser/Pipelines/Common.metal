@@ -15,6 +15,48 @@ inline float uintToDepthReverseZ(uint depth) {
     return float(depth) / float(CR_MAX_DEPTH - 1u);
 }
 
+inline int pointFootprintRadius(
+    float3 point,
+    RasterFile file,
+    float4x4 viewMatrix,
+    float4x4 projectionMatrix,
+    int2 screenSize,
+    int pointSizeMode,
+    float minimumPointSize,
+    float maximumPointSize,
+    float pointSizeScale
+) {
+    const float3 worldPoint = (file.world * float4(point, 1.0)).xyz;
+    const float4 viewPos = viewMatrix * float4(worldPoint, 1.0);
+    const float lo = max(min(minimumPointSize, maximumPointSize), 1.0);
+    const float hi = max(max(minimumPointSize, maximumPointSize), lo);
+
+    float pointSize;
+    if (pointSizeMode == 1) {
+        const float viewZ = max(-viewPos.z, 0.000001);
+        const float focal = float(screenSize.y) * 0.5 * projectionMatrix[1][1];
+        pointSize = 2.0 * pointSizeScale * focal / viewZ;
+    } else {
+        const float viewDistance = max(length(viewPos.xyz), 0.000001);
+        pointSize = pointSizeScale / viewDistance;
+    }
+    if (!isfinite(pointSize)) {
+        pointSize = lo;
+    }
+    pointSize = clamp(pointSize, lo, hi);
+    return clamp(int(ceil(max(pointSize - 1.0, 0.0) * 0.5)), 0, 16);
+}
+
+inline bool insidePointFootprint(int2 offset, int radius) {
+    if (radius <= 0) {
+        return offset.x == 0 && offset.y == 0;
+    }
+
+    const float2 p = float2(offset);
+    const float r = float(radius) + 0.5;
+    return dot(p, p) <= r * r;
+}
+
 inline float3 batchMin(RasterBatch batch) {
     return float3(batch.minX, batch.minY, batch.minZ);
 }

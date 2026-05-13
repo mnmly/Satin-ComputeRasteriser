@@ -116,6 +116,9 @@ public struct ComputeRasteriserConfiguration {
     public var enableFrustumCulling: Bool
     public var colorizeChunks: Bool
     public var colorizeOverdraw: Bool
+    public var minimumPointSize: Float
+    public var maximumPointSize: Float
+    public var pointSizeScale: Float
 }
 ```
 
@@ -127,6 +130,9 @@ Defaults:
 - `enableFrustumCulling = true`
 - `colorizeChunks = false`
 - `colorizeOverdraw = false`
+- `minimumPointSize = 1`
+- `maximumPointSize = 1`
+- `pointSizeScale = 1`
 
 Modes:
 
@@ -134,6 +140,16 @@ Modes:
 - `.nearestPoint`: CUDA-inspired path using a reverse-Z `UInt32` depth buffer, a second point-index pass, and `atomic_max` on depth.
 
 The first nearest-point implementation resolves one visible point cloud per frame because the index buffer stores a local 32-bit point index, not a cloud id.
+
+Point size:
+
+```swift
+rasteriser.configuration.minimumPointSize = 1
+rasteriser.configuration.maximumPointSize = 5
+rasteriser.configuration.pointSizeScale = 5
+```
+
+The shader computes `pointSize = clamp(pointSizeScale / cameraDistance, minimumPointSize, maximumPointSize)`. A size of `1` writes a single pixel, so the defaults preserve the original one-pixel rasterization.
 
 ## Loading PLY
 

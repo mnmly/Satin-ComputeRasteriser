@@ -10,6 +10,15 @@ public enum ComputeRasteriserMode: CaseIterable, Hashable, Sendable {
     case nearestPoint
 }
 
+public enum PointSizeMode: Int32, CaseIterable, Hashable, Sendable {
+    /// `pointSizeScale / length(viewSpacePosition)` clamped to [min, max] pixels.
+    /// `pointSizeScale` behaves as "pixels at one unit of view distance"; FOV does not affect size.
+    case screenSpace = 0
+    /// Perspective projection of a world-space sphere radius.
+    /// `pointSizeScale` is interpreted as the sphere radius in scene units; FOV and screen height affect size.
+    case worldSpace = 1
+}
+
 public struct ComputeRasteriserConfiguration: Sendable {
     public var mode: ComputeRasteriserMode
     public var depthTolerance: Float
@@ -17,6 +26,10 @@ public struct ComputeRasteriserConfiguration: Sendable {
     public var enableFrustumCulling: Bool
     public var colorizeChunks: Bool
     public var colorizeOverdraw: Bool
+    public var pointSizeMode: PointSizeMode
+    public var minimumPointSize: Float
+    public var maximumPointSize: Float
+    public var pointSizeScale: Float
 
     public init(
         mode: ComputeRasteriserMode = .highQualityAverage,
@@ -24,7 +37,11 @@ public struct ComputeRasteriserConfiguration: Sendable {
         backgroundColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.0, 0.0, 0.0),
         enableFrustumCulling: Bool = true,
         colorizeChunks: Bool = false,
-        colorizeOverdraw: Bool = false
+        colorizeOverdraw: Bool = false,
+        pointSizeMode: PointSizeMode = .screenSpace,
+        minimumPointSize: Float = 1.0,
+        maximumPointSize: Float = 1.0,
+        pointSizeScale: Float = 1.0
     ) {
         self.mode = mode
         self.depthTolerance = depthTolerance
@@ -32,6 +49,10 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.enableFrustumCulling = enableFrustumCulling
         self.colorizeChunks = colorizeChunks
         self.colorizeOverdraw = colorizeOverdraw
+        self.pointSizeMode = pointSizeMode
+        self.minimumPointSize = minimumPointSize
+        self.maximumPointSize = maximumPointSize
+        self.pointSizeScale = pointSizeScale
     }
 }
 

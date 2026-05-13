@@ -24,6 +24,7 @@ Implemented:
 - PLY point-cloud loading for `x/y/z` plus optional `red/green/blue`
 - Clear, depth, color, and resolve Metal compute passes
 - CUDA-inspired nearest-point Metal mode with portable 32-bit atomics
+- Distance-based point sizing for both HQS and nearest modes
 - Satin integration through `Object`, `ComputeProcessor`, and `PostProcessor`
 - macOS example app in `Examples/SatinComputeRasteriserApp`
 

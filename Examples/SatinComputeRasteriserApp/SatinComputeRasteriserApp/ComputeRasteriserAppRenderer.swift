@@ -8,6 +8,10 @@ public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var status: String = "Fixture"
     @Published public var errorMessage: String?
     @Published public var mode: ComputeRasteriserMode = .highQualityAverage
+    @Published public var pointSizeMode: PointSizeMode = .screenSpace
+    @Published public var minimumPointSize: Float = 1.0
+    @Published public var maximumPointSize: Float = 5.0
+    @Published public var pointSizeScale: Float = 5.0
 
     public init() {}
 }
@@ -47,6 +51,10 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.addPointCloud(pointCloud)
         rasteriser.configuration.backgroundColor = [0, 0, 0, 0]
         rasteriser.configuration.mode = appState.mode
+        rasteriser.configuration.pointSizeMode = appState.pointSizeMode
+        rasteriser.configuration.minimumPointSize = appState.minimumPointSize
+        rasteriser.configuration.maximumPointSize = appState.maximumPointSize
+        rasteriser.configuration.pointSizeScale = appState.pointSizeScale
         camera.lookAt(target: .zero)
         cameraController = PerspectiveCameraController(camera: camera, view: metalView)
         cameraController?.defaultDistance = 2.4
@@ -111,6 +119,32 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.configuration.mode = mode
         DispatchQueue.main.async { [appState] in
             appState.mode = mode
+        }
+    }
+
+    public func setPointSizing(mode: PointSizeMode? = nil, minimum: Float? = nil, maximum: Float? = nil, scale: Float? = nil) {
+        if let mode {
+            if mode != rasteriser.configuration.pointSizeMode {
+                rasteriser.configuration.pointSizeScale = mode == .worldSpace ? 0.01 : 5.0
+                rasteriser.configuration.maximumPointSize = mode == .worldSpace ? 64.0 : 5.0
+            }
+            rasteriser.configuration.pointSizeMode = mode
+        }
+        if let minimum {
+            rasteriser.configuration.minimumPointSize = minimum
+        }
+        if let maximum {
+            rasteriser.configuration.maximumPointSize = maximum
+        }
+        if let scale {
+            rasteriser.configuration.pointSizeScale = scale
+        }
+
+        DispatchQueue.main.async { [appState, configuration = rasteriser.configuration] in
+            appState.pointSizeMode = configuration.pointSizeMode
+            appState.minimumPointSize = configuration.minimumPointSize
+            appState.maximumPointSize = configuration.maximumPointSize
+            appState.pointSizeScale = configuration.pointSizeScale
         }
     }
 

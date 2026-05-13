@@ -21,6 +21,22 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         didSet { set("enableFrustumCulling", enableFrustumCulling ? 1 : 0) }
     }
 
+    public var pointSizeMode: PointSizeMode = .screenSpace {
+        didSet { set("pointSizeMode", Int(pointSizeMode.rawValue)) }
+    }
+
+    public var minimumPointSize: Float = 1.0 {
+        didSet { set("minimumPointSize", minimumPointSize) }
+    }
+
+    public var maximumPointSize: Float = 1.0 {
+        didSet { set("maximumPointSize", maximumPointSize) }
+    }
+
+    public var pointSizeScale: Float = 1.0 {
+        didSet { set("pointSizeScale", pointSizeScale) }
+    }
+
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
     public var xyzLowBuffer: MTLBuffer? { didSet { set(xyzLowBuffer, index: .Custom1) } }
     public var xyzMedBuffer: MTLBuffer? { didSet { set(xyzMedBuffer, index: .Custom2) } }
@@ -34,6 +50,10 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         set("viewMatrix", viewMatrix)
         set("projectionMatrix", projectionMatrix)
         set("enableFrustumCulling", enableFrustumCulling ? 1 : 0)
+        set("pointSizeMode", Int(pointSizeMode.rawValue))
+        set("minimumPointSize", minimumPointSize)
+        set("maximumPointSize", maximumPointSize)
+        set("pointSizeScale", pointSizeScale)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
@@ -59,4 +79,3 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         )
     }
 }
-

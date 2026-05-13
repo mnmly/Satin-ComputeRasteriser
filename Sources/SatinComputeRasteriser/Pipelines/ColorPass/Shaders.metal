@@ -8,6 +8,10 @@ struct ColorPassUniforms {
     float depthTolerance;
     int colorizeChunks;
     int colorizeOverdraw;
+    int pointSizeMode;
+    float minimumPointSize;
+    float maximumPointSize;
+    float pointSizeScale;
 };
 
 kernel void colorPassUpdate(
@@ -58,18 +62,6 @@ kernel void colorPassUpdate(
         }
         pixelCoord.y = uniforms.screenSize.y - 1 - pixelCoord.y;
 
-        const uint pixelIndex = uint(pixelCoord.y * uniforms.screenSize.x + pixelCoord.x);
-        const uint closestDepthUint = pixels[pixelIndex].depth;
-        if (closestDepthUint == 0u) {
-            continue;
-        }
-
-        const float closestDepth = uintToDepthReverseZ(closestDepthUint);
-        const bool visible = ndc.z >= closestDepth * (1.0 - uniforms.depthTolerance);
-        if (!visible) {
-            continue;
-        }
-
         uint color = colors[pointIndex];
         if (uniforms.colorizeChunks != 0) {
             color = batchIndex * 1234567u;
@@ -80,11 +72,42 @@ kernel void colorPassUpdate(
         const uint r = color & 0xffu;
         const uint g = (color >> 8) & 0xffu;
         const uint b = (color >> 16) & 0xffu;
+        const int radius = pointFootprintRadius(
+            point, file,
+            uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
+            uniforms.pointSizeMode,
+            uniforms.minimumPointSize, uniforms.maximumPointSize, uniforms.pointSizeScale
+        );
 
-        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red, r, memory_order_relaxed);
-        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, g, memory_order_relaxed);
-        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue, b, memory_order_relaxed);
-        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, 1u, memory_order_relaxed);
+        for (int oy = -radius; oy <= radius; oy++) {
+            for (int ox = -radius; ox <= radius; ox++) {
+                const int2 offset = int2(ox, oy);
+                if (!insidePointFootprint(offset, radius)) {
+                    continue;
+                }
+
+                const int2 target = pixelCoord + offset;
+                if (target.x < 0 || target.x >= uniforms.screenSize.x || target.y < 0 || target.y >= uniforms.screenSize.y) {
+                    continue;
+                }
+
+                const uint pixelIndex = uint(target.y * uniforms.screenSize.x + target.x);
+                const uint closestDepthUint = pixels[pixelIndex].depth;
+                if (closestDepthUint == 0u) {
+                    continue;
+                }
+
+                const float closestDepth = uintToDepthReverseZ(closestDepthUint);
+                const bool visible = ndc.z >= closestDepth * (1.0 - uniforms.depthTolerance);
+                if (!visible) {
+                    continue;
+                }
+
+                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red, r, memory_order_relaxed);
+                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, g, memory_order_relaxed);
+                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue, b, memory_order_relaxed);
+                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, 1u, memory_order_relaxed);
+            }
+        }
     }
 }
-
