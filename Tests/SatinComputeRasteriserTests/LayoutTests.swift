@@ -40,7 +40,38 @@ import Testing
     let packed = try PLYPointCloudLoader.parse(Data(ply.utf8), pointsPerBatch: 2)
     #expect(packed.pointCount == 3)
     #expect(packed.batchCount == 2)
-    #expect(packed.colors[0] == 0x000000ff)
-    #expect(packed.colors[1] == 0x0000ff00)
-    #expect(packed.colors[2] == 0x00ff0000)
+    let colorSet = Set(packed.colors)
+    #expect(colorSet == [0x000000ff, 0x0000ff00, 0x00ff0000])
+}
+
+@Test func packPreservesPointCountAndColorMultisetUnderMortonOrdering() {
+    let positions: [SIMD3<Float>] = [
+        SIMD3<Float>(0, 0, 0),
+        SIMD3<Float>(1, 0, 0),
+        SIMD3<Float>(0, 1, 0),
+        SIMD3<Float>(0, 0, 1),
+        SIMD3<Float>(1, 1, 1),
+    ]
+    let colors: [SIMD4<Float>] = [
+        SIMD4<Float>(1, 0, 0, 1),
+        SIMD4<Float>(0, 1, 0, 1),
+        SIMD4<Float>(0, 0, 1, 1),
+        SIMD4<Float>(1, 1, 0, 1),
+        SIMD4<Float>(1, 1, 1, 1),
+    ]
+
+    let packed = PackedPointCloudFixtures.pack(positions: positions, colors: colors, pointsPerBatch: 2)
+    #expect(packed.pointCount == 5)
+    #expect(packed.batchCount == 3)
+
+    let expected: [UInt32: Int] = [
+        0x000000ff: 1,
+        0x0000ff00: 1,
+        0x00ff0000: 1,
+        0x0000ffff: 1,
+        0x00ffffff: 1,
+    ]
+    var actual: [UInt32: Int] = [:]
+    for c in packed.colors { actual[c, default: 0] += 1 }
+    #expect(actual == expected)
 }

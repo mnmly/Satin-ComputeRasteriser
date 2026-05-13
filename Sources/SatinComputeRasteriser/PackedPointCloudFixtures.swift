@@ -50,15 +50,19 @@ public enum PackedPointCloudFixtures {
             boundsMax = simd_max(boundsMax, position)
         }
 
+        let order = mortonOrder(positions: positions, boundsMin: boundsMin, boundsMax: boundsMax)
+        let sortedPositions = order.map { positions[$0] }
+        let sortedColorsSrc = order.map { colors[$0] }
+
         var batches: [RasterBatch] = []
-        var xyzLow = Array(repeating: UInt32(0), count: positions.count)
-        var xyzMed = Array(repeating: UInt32(0), count: positions.count)
-        var xyzHigh = Array(repeating: UInt32(0), count: positions.count)
+        var xyzLow = Array(repeating: UInt32(0), count: sortedPositions.count)
+        var xyzMed = Array(repeating: UInt32(0), count: sortedPositions.count)
+        var xyzHigh = Array(repeating: UInt32(0), count: sortedPositions.count)
 
         var first = 0
-        while first < positions.count {
-            let end = min(first + max(pointsPerBatch, 1), positions.count)
-            let slice = positions[first ..< end]
+        while first < sortedPositions.count {
+            let end = min(first + max(pointsPerBatch, 1), sortedPositions.count)
+            let slice = sortedPositions[first ..< end]
             var batchMin = SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
             var batchMax = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
 
@@ -70,7 +74,7 @@ public enum PackedPointCloudFixtures {
             let size = max(batchMax - batchMin, SIMD3<Float>(repeating: 0.000001))
 
             for pointIndex in first ..< end {
-                let normalized = simd_clamp((positions[pointIndex] - batchMin) / size, .zero, SIMD3<Float>(repeating: 0.99999994))
+                let normalized = simd_clamp((sortedPositions[pointIndex] - batchMin) / size, .zero, SIMD3<Float>(repeating: 0.99999994))
                 let q = SIMD3<UInt32>(
                     UInt32(normalized.x * Float(computeRasteriserSteps30Bit - 1)),
                     UInt32(normalized.y * Float(computeRasteriserSteps30Bit - 1)),
@@ -104,7 +108,7 @@ public enum PackedPointCloudFixtures {
             first = end
         }
 
-        let packedColors = colors.map { color -> UInt32 in
+        let packedColors = sortedColorsSrc.map { color -> UInt32 in
             let r = UInt32(simd_clamp(color.x, 0.0, 1.0) * 255.0)
             let g = UInt32(simd_clamp(color.y, 0.0, 1.0) * 255.0)
             let b = UInt32(simd_clamp(color.z, 0.0, 1.0) * 255.0)
@@ -122,5 +126,40 @@ public enum PackedPointCloudFixtures {
             boundsMax: boundsMax
         )
     }
+}
+
+// Z-order points so consecutive entries are spatially close. Tighter per-batch
+// AABBs (better frustum culling and precision selection) and better cache
+// coherency for neighbouring threadgroup reads in the rasteriser passes.
+private func mortonOrder(
+    positions: [SIMD3<Float>],
+    boundsMin: SIMD3<Float>,
+    boundsMax: SIMD3<Float>
+) -> [Int] {
+    let count = positions.count
+    let extent = simd_max(boundsMax - boundsMin, SIMD3<Float>(repeating: 0.000001))
+    let scale = SIMD3<Float>(repeating: 1023.0) / extent
+
+    var keys = [UInt32](repeating: 0, count: count)
+    for i in 0 ..< count {
+        let normalized = simd_clamp((positions[i] - boundsMin) * scale, .zero, SIMD3<Float>(repeating: 1023.0))
+        let qx = UInt32(normalized.x)
+        let qy = UInt32(normalized.y)
+        let qz = UInt32(normalized.z)
+        keys[i] = (mortonSpread10(qx) << 2) | (mortonSpread10(qy) << 1) | mortonSpread10(qz)
+    }
+
+    var indices = Array(0 ..< count)
+    indices.sort { keys[$0] < keys[$1] }
+    return indices
+}
+
+private func mortonSpread10(_ value: UInt32) -> UInt32 {
+    var x = value & 0x3ff
+    x = (x | (x << 16)) & 0x030000ff
+    x = (x | (x << 8))  & 0x0300f00f
+    x = (x | (x << 4))  & 0x030c30c3
+    x = (x | (x << 2))  & 0x09249249
+    return x
 }
 
