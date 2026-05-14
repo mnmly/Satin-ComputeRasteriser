@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		991264CA2FB66479003B2067 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 991264C92FB66479003B2067 /* SatinComputeRasteriser */; };
+		9912654F2FB6668D003B2067 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 9912654E2FB6668D003B2067 /* SatinComputeRasteriser */; };
 		99A1D91F2FB30FC200CA3897 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */; };
 		AABCDEF000000000000001A1 /* SwiftPDAL in Frameworks */ = {isa = PBXBuildFile; productRef = AABCDEF000000000000001C3 /* SwiftPDAL */; };
 /* End PBXBuildFile section */
@@ -31,6 +32,7 @@
 			files = (
 				991264CA2FB66479003B2067 /* SatinComputeRasteriser in Frameworks */,
 				99A1D91F2FB30FC200CA3897 /* SatinComputeRasteriser in Frameworks */,
+				9912654F2FB6668D003B2067 /* SatinComputeRasteriser in Frameworks */,
 				AABCDEF000000000000001A1 /* SwiftPDAL in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -77,6 +79,7 @@
 				99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */,
 				991264C92FB66479003B2067 /* SatinComputeRasteriser */,
 				AABCDEF000000000000001C3 /* SwiftPDAL */,
+				9912654E2FB6668D003B2067 /* SatinComputeRasteriser */,
 			);
 			productName = SatinComputeRasteriserApp;
 			productReference = 99A1D90F2FB30FA700CA3897 /* SatinComputeRasteriserApp.app */;
@@ -107,8 +110,8 @@
 			mainGroup = 99A1D9062FB30FA700CA3897;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				991264C82FB66479003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */,
 				AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */,
+				9912654D2FB6668D003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 99A1D9102FB30FA700CA3897 /* Products */;
@@ -262,6 +265,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = SatinComputeRasteriserApp/SatinComputeRasteriserApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = GP3ES2Y53G;
@@ -308,6 +312,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = SatinComputeRasteriserApp/SatinComputeRasteriserApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = GP3ES2Y53G;
@@ -373,7 +378,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		991264C82FB66479003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */ = {
+		9912654D2FB6668D003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../Satin-ComputeRasteriser";
 		};
@@ -392,6 +397,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		991264C92FB66479003B2067 /* SatinComputeRasteriser */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SatinComputeRasteriser;
+		};
+		9912654E2FB6668D003B2067 /* SatinComputeRasteriser */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SatinComputeRasteriser;
 		};

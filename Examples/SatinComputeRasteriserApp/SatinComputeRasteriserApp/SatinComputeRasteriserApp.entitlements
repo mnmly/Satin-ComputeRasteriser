@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App sandbox + user-selected files (auto-generated equivalents). -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+
+	<!--
+	  PDAL/GDAL ships its xcframework with embedded dylibs (libodbcinst,
+	  libproj, libsqlite3, …) signed by upstream / ad-hoc, with a Team ID
+	  that doesn't match this app. Hardened runtime's library validation
+	  rejects them at dyld time. Disabling library validation lets the app
+	  load the bundled dylibs without re-signing them per-build.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>
