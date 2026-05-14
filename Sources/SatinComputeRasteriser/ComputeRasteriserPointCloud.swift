@@ -1,9 +1,71 @@
+import Foundation
 import Metal
 import Satin
 import simd
 
+/// Sizing for a ``ComputeRasteriserPointCloud``'s slot pool.
+///
+/// The renderer pre-allocates GPU buffers for `maxResidentBatches` slots,
+/// each `pointsPerBatch` points wide. Streaming sources (e.g.
+/// SwiftPDAL's `CopcStreamingPointCloudSource`) page chunks in and out
+/// of those slots without touching the underlying buffers — uploads are
+/// `MTLBlitCommandEncoder` copies into a slot's byte range.
+///
+/// Total VRAM cost for positions + colors + levels:
+///
+/// ```
+/// maxResidentBatches × pointsPerBatch × 17 bytes
+/// ```
+///
+/// At the defaults below (`8192 × 10240`) that's ~1.4 GB. Tune
+/// `maxResidentBatches` to your VRAM budget and the typical working set
+/// of your camera path.
+public struct ComputeRasteriserCapacity: Hashable, Sendable {
+    /// Number of fixed-size slots in the pool. Each slot holds at most
+    /// `pointsPerBatch` points and one ``RasterBatch`` of metadata.
+    public let maxResidentBatches: Int
+    /// Per-slot point capacity. Must match the streaming source's
+    /// `pointsPerBatch` (SwiftPDAL's default is `128 * 80 = 10240`).
+    public let pointsPerBatch: Int
+
+    public init(maxResidentBatches: Int, pointsPerBatch: Int = computeRasteriserThreadsPerGroup * 80) {
+        precondition(maxResidentBatches > 0, "maxResidentBatches must be positive")
+        precondition(pointsPerBatch > 0, "pointsPerBatch must be positive")
+        self.maxResidentBatches = maxResidentBatches
+        self.pointsPerBatch = pointsPerBatch
+    }
+
+    /// Total point capacity of the pool (`maxResidentBatches × pointsPerBatch`).
+    public var maxResidentPoints: Int { maxResidentBatches * pointsPerBatch }
+}
+
+/// A point cloud rendered by ``ComputeRasteriser``.
+///
+/// Owns a fixed-size slot pool of GPU buffers (positions split into 3×10-bit
+/// `UInt32`, packed RGBA `UInt32`, per-point `UInt8` LOD level, and one
+/// ``RasterBatch`` of metadata per slot). Two ways to populate it:
+///
+/// * **Wholesale**, via ``init(context:packed:label:)`` /
+///   ``replacePackedPointCloud(_:)`` — sizes the pool to fit and uploads
+///   in one shot. Backwards-compatible with pre-streaming code.
+/// * **Incremental**, via ``init(context:capacity:files:originShift:label:)``
+///   followed by ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
+///   and ``removeBatches(slots:)`` — designed for an external streaming
+///   source (e.g. SwiftPDAL) that pages chunks in and out as the camera moves.
+///
+/// In both modes the cull kernel iterates every slot and short-circuits
+/// non-resident ones via ``RasterBatch/state``, so empty slots cost one
+/// branch per frame.
 public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
-    public private(set) var packed: PackedPointCloud
+    /// Slot-pool sizing the cloud was created with. May change if a
+    /// ``replacePackedPointCloud(_:)`` call needs to grow the pool.
+    public private(set) var capacity: ComputeRasteriserCapacity
+
+    /// Per-file transforms (model/view/projection bake-out). The first slot
+    /// is what the renderer projects through; non-streaming users see one
+    /// identity-world `RasterFile`. Streaming clouds get an `originShift`
+    /// translation baked into `files[0].world` at init.
+    public private(set) var files: [RasterFile]
 
     public private(set) var batchesBuffer: MTLBuffer?
     /// Ring-buffered per-batch transforms. Each `updateFiles(...)` advances
@@ -12,7 +74,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// regions of the buffer. ``filesBufferOffset`` returns the byte offset
     /// of the most recent slot — bind at this offset when encoding.
     public private(set) var filesBuffer: MTLBuffer?
-    /// Byte offset of the slot most recently written by ``updateFiles(viewProjection:modelMatrix:frustumTransform:)``.
+    /// Byte offset of the slot most recently written by
+    /// ``updateFiles(viewProjection:modelMatrix:frustumTransform:)``.
     /// Bind ``filesBuffer`` at this offset so the GPU reads the matching
     /// per-camera transforms when this encode actually executes.
     public private(set) var filesBufferOffset: Int = 0
@@ -25,36 +88,54 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public private(set) var cullCounterBuffer: MTLBuffer?
     public private(set) var cullIndirectArgsBuffer: MTLBuffer?
 
-    /// Optional per-point displacement (one `float3` per pack-order point,
+    /// Optional per-point displacement (one `float3` per slot-pool point,
     /// stride 16 bytes). Bound at `Custom8` on the depth + color passes when
     /// `ComputeRasteriserConfiguration.applyDisplacement == true`.
     public var displacementBuffer: MTLBuffer?
 
-    /// Allocate a `pointCount * stride(float3)` buffer suitable for use as
-    /// `displacementBuffer`. Caller owns the buffer; fill it from a compute
-    /// kernel each frame (or once, for static displacement).
+    /// Allocate a `capacity.maxResidentPoints * stride(float3)` buffer
+    /// suitable for use as ``displacementBuffer``. Sized by pool capacity
+    /// (not current resident count) so the buffer is allocated once and
+    /// addressed by `firstPoint + localOffset` regardless of which slots
+    /// are resident.
     public func makeDisplacementBuffer(
         storage: MTLStorageMode = .private,
         label: String? = nil
     ) -> MTLBuffer? {
-        guard pointCount > 0 else { return nil }
-        let length = pointCount * MemoryLayout<SIMD3<Float>>.stride
+        let length = capacity.maxResidentPoints * MemoryLayout<SIMD3<Float>>.stride
         let buffer = context.device.makeBuffer(length: length, options: storage == .private ? .storageModePrivate : .storageModeShared)
         buffer?.label = label ?? "\(self.label).Displacement"
         return buffer
     }
 
-    public var batchCount: Int { packed.batchCount }
-    public var pointCount: Int { packed.pointCount }
+    /// Number of slots the cull kernel dispatches over (= ``capacity``'s
+    /// `maxResidentBatches`). Non-resident slots are skipped before the
+    /// frustum test via ``RasterBatch/state`` `== 0`.
+    public var batchCount: Int { capacity.maxResidentBatches }
 
-    /// Number of in-flight `filesBuffer` slots. Sized for stereo (2 cameras
+    /// Number of slots currently holding a resident batch.
+    public private(set) var residentBatchCount: Int = 0
+
+    /// Sum of `numPoints` across all resident batches.
+    public private(set) var pointCount: Int = 0
+
+    /// Number of in-flight ``filesBuffer`` slots. Sized for stereo (2 cameras
     /// per frame) × Satin's triple-buffering (3 frames in flight) = 6.
-    /// Filesbuffer per-slot stride is small (≈256 B per RasterFile × file
-    /// count, typically a handful), so the extra memory is trivial.
+    /// Per-slot stride is small (≈256 B per `RasterFile` × file count, typically
+    /// a handful), so the extra memory is trivial.
     public static let filesBufferSlotCount: Int = Satin.maxBuffersInFlight * 2
 
     private var filesSlotIndex: Int = -1
     private var filesSlotStride: Int = 0
+
+    /// CPU-side mirror of every slot's ``RasterBatch``. Mutated by
+    /// ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
+    /// and ``removeBatches(slots:)``, then memcpy'd into ``batchesBuffer``
+    /// in one shot. Empty slots have `state == 0` and do not contribute to
+    /// ``pointCount`` / ``residentBatchCount``.
+    private var batchMirror: [RasterBatch]
+    /// LIFO of free slot indices. Newest-freed wins so cache lines stay warm.
+    private var freeSlots: [Int]
 
     /// `BindableBuffer` view onto the most recently written ``filesBuffer``
     /// slot. Pass this (not `filesBuffer` directly) to compute processors so
@@ -71,68 +152,266 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         let offset: Int
     }
 
-    public init(context: Context, packed: PackedPointCloud, label: String = "ComputeRasteriserPointCloud") {
-        self.packed = packed
+    /// Streaming-mode init. Pre-allocates an empty slot pool; the caller
+    /// drives residency via
+    /// ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
+    /// and ``removeBatches(slots:)``.
+    ///
+    /// - Parameters:
+    ///   - context: Satin context (provides the Metal device).
+    ///   - capacity: pool size; see ``ComputeRasteriserCapacity``.
+    ///   - files: per-file transform table. Streaming sources typically pass
+    ///     `[RasterFile(world: translation(originShift))]` so chunk positions
+    ///     (which the source pre-shifted to the file's bounds center for
+    ///     `Float` precision) land at their original world coordinates.
+    ///   - originShift: convenience translation baked into `files[0].world`
+    ///     when `files` is left at its default. Ignored if `files` is non-default.
+    ///   - label: human-readable label, used as the prefix on Metal buffer labels.
+    public init(
+        context: Context,
+        capacity: ComputeRasteriserCapacity,
+        files: [RasterFile]? = nil,
+        originShift: SIMD3<Float> = .zero,
+        label: String = "ComputeRasteriserPointCloud"
+    ) {
+        self.capacity = capacity
+        self.files = files ?? [RasterFile(world: matrix_translation(originShift))]
+        self.batchMirror = Array(
+            repeating: RasterBatch(min: .zero, max: .zero, numPoints: 0, firstPoint: 0, fileIndex: 0, state: 0),
+            count: capacity.maxResidentBatches
+        )
+        self.freeSlots = (0 ..< capacity.maxResidentBatches).reversed()
         super.init(context: context, label: label)
-        rebuildBuffers()
+        allocateBuffers()
+    }
+
+    /// Convenience init: capacity is sized to fit `packed` exactly and the
+    /// cloud is immediately populated. Drop-in for non-streaming code.
+    public convenience init(
+        context: Context,
+        packed: PackedPointCloud,
+        label: String = "ComputeRasteriserPointCloud"
+    ) {
+        let pointsPerBatch = max(1, Int(packed.batches.map(\.numPoints).max() ?? UInt32(computeRasteriserThreadsPerGroup * 80)))
+        let cap = ComputeRasteriserCapacity(
+            maxResidentBatches: max(1, packed.batchCount),
+            pointsPerBatch: pointsPerBatch
+        )
+        self.init(context: context, capacity: cap, files: packed.files, label: label)
+        if packed.batchCount > 0 {
+            uploadPacked(packed)
+        }
     }
 
     public required init(from decoder: any Decoder) throws {
         fatalError("init(from:) has not been implemented")
     }
 
+    /// Wholesale replace the cloud's contents. Reallocates the slot pool if
+    /// `packed` doesn't fit the current ``capacity`` (preserving the existing
+    /// `pointsPerBatch`). Equivalent to `clearAllBatches()` + `addBatches(...)`
+    /// for the common case where the new cloud fits.
     public func replacePackedPointCloud(_ packed: PackedPointCloud) {
-        self.packed = packed
-        rebuildBuffers()
+        let needed = max(1, packed.batchCount)
+        let pointsPerBatch = max(1, Int(packed.batches.map(\.numPoints).max() ?? UInt32(capacity.pointsPerBatch)))
+        if needed > capacity.maxResidentBatches || pointsPerBatch > capacity.pointsPerBatch {
+            // Reallocate.
+            let newCapacity = ComputeRasteriserCapacity(
+                maxResidentBatches: needed,
+                pointsPerBatch: max(pointsPerBatch, capacity.pointsPerBatch)
+            )
+            reallocate(to: newCapacity, files: packed.files)
+        } else {
+            files = packed.files
+            rebuildFilesBuffer()
+            clearAllBatches()
+        }
+        if packed.batchCount > 0 {
+            uploadPacked(packed)
+        }
     }
 
+    /// Mark every slot empty without freeing GPU buffers. Cheap; subsequent
+    /// `addBatches` reuses slot 0 first.
+    public func clearAllBatches() {
+        for slot in 0 ..< capacity.maxResidentBatches {
+            batchMirror[slot].state = 0
+            batchMirror[slot].numPoints = 0
+        }
+        freeSlots = (0 ..< capacity.maxResidentBatches).reversed()
+        residentBatchCount = 0
+        pointCount = 0
+        flushBatchMirror()
+    }
+
+    /// Upload one or more batches into free slots.
+    ///
+    /// Each input `batches[i]` describes a contiguous run of points in the
+    /// position/color/level `Data` blobs starting at `batches[i].firstPoint`.
+    /// The renderer rebases that run into a fresh slot: the returned
+    /// `slotIndices[i]` × `pointsPerBatch` becomes the slot's `firstPoint`
+    /// in the GPU buffers.
+    ///
+    /// - Parameters:
+    ///   - positionsXYZLow: contiguous `UInt32`-per-point low-bits axis pack;
+    ///     must cover at least `batches.last.firstPoint + numPoints` entries.
+    ///   - positionsXYZMed: middle-bits axis pack, same shape as `positionsXYZLow`.
+    ///   - positionsXYZHigh: high-bits axis pack, same shape as `positionsXYZLow`.
+    ///   - colors: contiguous packed RGBA `UInt32`-per-point.
+    ///   - levels: contiguous `UInt8`-per-point LOD level.
+    ///   - batches: metadata, one per chunk to add. Caller's `firstPoint`/`state`
+    ///     are rewritten by the renderer; AABB / `numPoints` / `fileIndex`
+    ///     are preserved.
+    /// - Returns: slot index (in `[0, capacity.maxResidentBatches)`) chosen
+    ///   for each input batch. Map this back to your chunk identity so a later
+    ///   ``removeBatches(slots:)`` call can free the right slots.
+    /// - Precondition: `freeSlotCount >= batches.count`. Call
+    ///   ``removeBatches(slots:)`` first if you'd otherwise overflow.
+    @discardableResult
+    public func addBatches(
+        positionsXYZLow: Data,
+        positionsXYZMed: Data,
+        positionsXYZHigh: Data,
+        colors: Data,
+        levels: Data,
+        batches: [RasterBatch]
+    ) -> [Int] {
+        precondition(batches.count <= freeSlots.count, "addBatches: not enough free slots (have \(freeSlots.count), need \(batches.count))")
+        guard !batches.isEmpty else { return [] }
+
+        var assigned: [Int] = []
+        assigned.reserveCapacity(batches.count)
+
+        for batch in batches {
+            let slot = freeSlots.removeLast()
+            assigned.append(slot)
+
+            let dstFirstPoint = slot * capacity.pointsPerBatch
+            let srcFirstPoint = Int(batch.firstPoint)
+            let count = Int(batch.numPoints)
+            precondition(count <= capacity.pointsPerBatch, "batch numPoints (\(count)) exceeds slot capacity (\(capacity.pointsPerBatch))")
+
+            copySlice(positionsXYZLow,  srcOffsetPoints: srcFirstPoint, dstOffsetPoints: dstFirstPoint, count: count, stride: 4, into: xyzLowBuffer)
+            copySlice(positionsXYZMed,  srcOffsetPoints: srcFirstPoint, dstOffsetPoints: dstFirstPoint, count: count, stride: 4, into: xyzMedBuffer)
+            copySlice(positionsXYZHigh, srcOffsetPoints: srcFirstPoint, dstOffsetPoints: dstFirstPoint, count: count, stride: 4, into: xyzHighBuffer)
+            copySlice(colors,           srcOffsetPoints: srcFirstPoint, dstOffsetPoints: dstFirstPoint, count: count, stride: 4, into: colorsBuffer)
+            copySlice(levels,           srcOffsetPoints: srcFirstPoint, dstOffsetPoints: dstFirstPoint, count: count, stride: 1, into: levelsBuffer)
+
+            var slotBatch = batch
+            slotBatch.firstPoint = UInt32(dstFirstPoint)
+            slotBatch.state = 1
+            batchMirror[slot] = slotBatch
+
+            residentBatchCount += 1
+            pointCount += count
+        }
+
+        flushBatchMirror()
+        return assigned
+    }
+
+    /// Free the given slots. Their ``RasterBatch/state`` flips to `0` so the
+    /// cull kernel skips them next frame; the slots return to the free list
+    /// and may be reused by a subsequent `addBatches`.
+    public func removeBatches(slots: [Int]) {
+        guard !slots.isEmpty else { return }
+        for slot in slots {
+            precondition(slot >= 0 && slot < capacity.maxResidentBatches, "removeBatches: slot \(slot) out of range")
+            if batchMirror[slot].state == 0 { continue }
+            pointCount -= Int(batchMirror[slot].numPoints)
+            residentBatchCount -= 1
+            batchMirror[slot].state = 0
+            batchMirror[slot].numPoints = 0
+            freeSlots.append(slot)
+        }
+        flushBatchMirror()
+    }
+
+    /// Per-frame cycle of the ``filesBuffer`` ring + memcpy of the latest
+    /// transforms. Called by the rasteriser once per camera per encode.
     public func updateFiles(
         viewProjection: simd_float4x4,
         modelMatrix: simd_float4x4,
         frustumTransform: simd_float4x4? = nil
     ) {
-        guard !packed.files.isEmpty, let filesBuffer else { return }
-        var files = packed.files
-        for index in files.indices {
+        guard !files.isEmpty, let filesBuffer else { return }
+        var snapshot = files
+        for index in snapshot.indices {
             let world = modelMatrix * files[index].world
-            files[index].transform = viewProjection * world
-            files[index].transformFrustum = (frustumTransform ?? viewProjection) * world
-            files[index].world = world
+            snapshot[index].transform = viewProjection * world
+            snapshot[index].transformFrustum = (frustumTransform ?? viewProjection) * world
+            snapshot[index].world = world
         }
 
         filesSlotIndex = (filesSlotIndex + 1) % Self.filesBufferSlotCount
         filesBufferOffset = filesSlotIndex * filesSlotStride
 
-        let byteCount = min(filesSlotStride, files.count * MemoryLayout<RasterFile>.stride)
-        files.withUnsafeBytes { bytes in
+        let byteCount = min(filesSlotStride, snapshot.count * MemoryLayout<RasterFile>.stride)
+        snapshot.withUnsafeBytes { bytes in
             filesBuffer.contents()
                 .advanced(by: filesBufferOffset)
                 .copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
         }
     }
 
-    private func rebuildBuffers() {
-        batchesBuffer = makeBuffer(packed.batches, label: "\(label).Batches")
-        filesBuffer = makeFilesRingBuffer(files: packed.files, label: "\(label).Files")
-        filesSlotIndex = -1
-        filesBufferOffset = 0
-        xyzLowBuffer = makeBuffer(packed.xyzLow, label: "\(label).XYZLow")
-        xyzMedBuffer = makeBuffer(packed.xyzMed, label: "\(label).XYZMed")
-        xyzHighBuffer = makeBuffer(packed.xyzHigh, label: "\(label).XYZHigh")
-        colorsBuffer = makeBuffer(packed.colors, label: "\(label).Colors")
-        levelsBuffer = makeBuffer(packed.levels, label: "\(label).Levels")
+    // MARK: - Pool plumbing
+
+    private func reallocate(to newCapacity: ComputeRasteriserCapacity, files: [RasterFile]) {
+        capacity = newCapacity
+        self.files = files
+        self.batchMirror = Array(
+            repeating: RasterBatch(min: .zero, max: .zero, numPoints: 0, firstPoint: 0, fileIndex: 0, state: 0),
+            count: newCapacity.maxResidentBatches
+        )
+        self.freeSlots = (0 ..< newCapacity.maxResidentBatches).reversed()
+        self.residentBatchCount = 0
+        self.pointCount = 0
+        allocateBuffers()
+    }
+
+    private func allocateBuffers() {
+        let pointsCap = capacity.maxResidentPoints
+        xyzLowBuffer  = makeEmptyBuffer(length: pointsCap * 4, label: "\(label).XYZLow")
+        xyzMedBuffer  = makeEmptyBuffer(length: pointsCap * 4, label: "\(label).XYZMed")
+        xyzHighBuffer = makeEmptyBuffer(length: pointsCap * 4, label: "\(label).XYZHigh")
+        colorsBuffer  = makeEmptyBuffer(length: pointsCap * 4, label: "\(label).Colors")
+        levelsBuffer  = makeEmptyBuffer(length: pointsCap,     label: "\(label).Levels")
+
+        let batchesByteCount = capacity.maxResidentBatches * MemoryLayout<RasterBatch>.stride
+        batchesBuffer = makeEmptyBuffer(length: batchesByteCount, label: "\(label).Batches")
+        flushBatchMirror()
+
+        rebuildFilesBuffer()
         rebuildCullBuffers()
     }
 
-    private func rebuildCullBuffers() {
-        guard packed.batchCount > 0 else {
-            visibleBatchesBuffer = nil
-            cullCounterBuffer = nil
-            cullIndirectArgsBuffer = nil
+    private func rebuildFilesBuffer() {
+        guard !files.isEmpty else {
+            filesBuffer = nil
+            filesBufferOffset = 0
+            filesSlotIndex = -1
+            filesSlotStride = 0
             return
         }
+        let perSlot = files.count * MemoryLayout<RasterFile>.stride
+        filesSlotStride = perSlot
+        let totalLength = perSlot * Self.filesBufferSlotCount
+        guard let buffer = context.device.makeBuffer(length: totalLength, options: .storageModeShared) else {
+            filesBuffer = nil
+            return
+        }
+        buffer.label = "\(label).Files"
+        files.withUnsafeBytes { bytes in
+            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: perSlot)
+        }
+        filesBuffer = buffer
+        filesSlotIndex = -1
+        filesBufferOffset = 0
+    }
+
+    private func rebuildCullBuffers() {
         visibleBatchesBuffer = context.device.makeBuffer(
-            length: packed.batchCount * MemoryLayout<VisibleBatch>.stride,
+            length: capacity.maxResidentBatches * MemoryLayout<VisibleBatch>.stride,
             options: .storageModePrivate
         )
         visibleBatchesBuffer?.label = "\(label).VisibleBatches"
@@ -148,38 +427,67 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         cullIndirectArgsBuffer?.label = "\(label).CullIndirectArgs"
     }
 
-    private func makeBuffer<T>(_ values: [T], label: String) -> MTLBuffer? {
-        guard !values.isEmpty else { return nil }
-        let byteCount = values.count * MemoryLayout<T>.stride
-        let buffer = values.withUnsafeBytes { bytes in
-            context.device.makeBuffer(bytes: bytes.baseAddress!, length: byteCount, options: .storageModeShared)
-        }
+    private func uploadPacked(_ packed: PackedPointCloud) {
+        let positionLow = Data(bytes: packed.xyzLow, count: packed.xyzLow.count * 4)
+        let positionMed = Data(bytes: packed.xyzMed, count: packed.xyzMed.count * 4)
+        let positionHigh = Data(bytes: packed.xyzHigh, count: packed.xyzHigh.count * 4)
+        let colors = Data(bytes: packed.colors, count: packed.colors.count * 4)
+        let levels = Data(packed.levels)
+        addBatches(
+            positionsXYZLow: positionLow,
+            positionsXYZMed: positionMed,
+            positionsXYZHigh: positionHigh,
+            colors: colors,
+            levels: levels,
+            batches: packed.batches
+        )
+    }
+
+    private func makeEmptyBuffer(length: Int, label: String) -> MTLBuffer? {
+        guard length > 0 else { return nil }
+        let buffer = context.device.makeBuffer(length: length, options: .storageModeShared)
         buffer?.label = label
         return buffer
     }
 
-    /// `filesBuffer` is sized for N in-flight slots so sequential
-    /// `updateFiles` calls within one command buffer don't clobber each
-    /// other. Slot 0 is seeded with `files` so the first encode that runs
-    /// before `updateFiles` has been called sees the identity-world state.
-    private func makeFilesRingBuffer(files: [RasterFile], label: String) -> MTLBuffer? {
-        guard !files.isEmpty else { return nil }
-        let perSlot = files.count * MemoryLayout<RasterFile>.stride
-        filesSlotStride = perSlot
-        let totalLength = perSlot * Self.filesBufferSlotCount
-        guard let buffer = context.device.makeBuffer(length: totalLength, options: .storageModeShared) else { return nil }
-        buffer.label = label
-        files.withUnsafeBytes { bytes in
-            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: perSlot)
+    private func flushBatchMirror() {
+        guard let batchesBuffer else { return }
+        let byteCount = min(batchesBuffer.length, batchMirror.count * MemoryLayout<RasterBatch>.stride)
+        batchMirror.withUnsafeBytes { bytes in
+            batchesBuffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
         }
-        return buffer
     }
 
-    private func updateBuffer<T>(_ buffer: MTLBuffer?, with values: [T]) {
-        guard let buffer, !values.isEmpty else { return }
-        let byteCount = min(buffer.length, values.count * MemoryLayout<T>.stride)
-        values.withUnsafeBytes { bytes in
-            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
+    private func copySlice(
+        _ source: Data,
+        srcOffsetPoints: Int,
+        dstOffsetPoints: Int,
+        count: Int,
+        stride: Int,
+        into buffer: MTLBuffer?
+    ) {
+        guard let buffer, count > 0 else { return }
+        let byteCount = count * stride
+        let srcByteOffset = srcOffsetPoints * stride
+        let dstByteOffset = dstOffsetPoints * stride
+        precondition(srcByteOffset + byteCount <= source.count, "addBatches: source data too small for batch")
+        precondition(dstByteOffset + byteCount <= buffer.length, "addBatches: dest buffer too small")
+        source.withUnsafeBytes { srcRaw in
+            let src = srcRaw.baseAddress!.advanced(by: srcByteOffset)
+            buffer.contents().advanced(by: dstByteOffset).copyMemory(from: src, byteCount: byteCount)
         }
     }
+}
+
+// MARK: - Helpers
+
+private func matrix_translation(_ t: SIMD3<Float>) -> simd_float4x4 {
+    var m = matrix_identity_float4x4
+    m.columns.3 = SIMD4<Float>(t, 1)
+    return m
+}
+
+extension ComputeRasteriserPointCloud {
+    /// Free slot count. `addBatches` requires at least `n` of these.
+    public var freeSlotCount: Int { freeSlots.count }
 }

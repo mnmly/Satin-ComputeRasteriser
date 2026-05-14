@@ -202,7 +202,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         clearProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
         clearProcessor.update(commandBuffer)
 
-        for cloud in pointClouds where cloud.visible && cloud.batchCount > 0 {
+        for cloud in pointClouds where cloud.visible && cloud.residentBatchCount > 0 {
             guard runCullPass(commandBuffer, cloud: cloud) else { continue }
 
             bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
@@ -223,7 +223,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private func encodeNearestPoint(_ commandBuffer: MTLCommandBuffer) {
         guard let nearestDepthBuffer,
               let nearestIndexBuffer,
-              let cloud = pointClouds.first(where: { $0.visible && $0.batchCount > 0 })
+              let cloud = pointClouds.first(where: { $0.visible && $0.residentBatchCount > 0 })
         else { return }
 
         clearWinnerProcessor.depthBuffer = nearestDepthBuffer

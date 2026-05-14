@@ -27,14 +27,15 @@ multiple clouds and toggle them with `visible`.
 
 ### Streaming
 
-For datasets larger than VRAM, the cloud is designed to be driven from
-an external streaming source (e.g. SwiftPDAL's
-`CopcStreamingPointCloudSource`). Non-resident slots short-circuit in
-the cull kernel via ``RasterBatch/state`` — a `state == 0` batch is
-skipped before frustum testing. The incremental upload API
-(`addBatches`/`removeBatches`) is documented under
-``ComputeRasteriserPointCloud`` once it lands; today's API is the
-wholesale ``ComputeRasteriserPointCloud/replacePackedPointCloud(_:)``.
+For datasets larger than VRAM, the cloud is driven from an external
+streaming source (e.g. SwiftPDAL's `CopcStreamingPointCloudSource`).
+Construct the cloud with ``ComputeRasteriserPointCloud/init(context:capacity:files:originShift:label:)``
+to allocate a fixed slot pool, then page chunks in/out via
+``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
+and ``ComputeRasteriserPointCloud/removeBatches(slots:)`` as the camera
+moves. Non-resident slots short-circuit in the cull kernel via
+``RasterBatch/state`` — a `state == 0` batch is skipped before frustum
+testing.
 
 ### Point packing
 
@@ -55,6 +56,7 @@ mirrored in SwiftPDAL's `ChunkPacker` so streamed chunks are upload-ready.
 ### Point clouds
 
 - ``ComputeRasteriserPointCloud``
+- ``ComputeRasteriserCapacity``
 - ``PackedPointCloud``
 - ``PackedPointCloudFixtures``
 - ``PLYPointCloudLoader``
