@@ -16,6 +16,25 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public private(set) var cullCounterBuffer: MTLBuffer?
     public private(set) var cullIndirectArgsBuffer: MTLBuffer?
 
+    /// Optional per-point displacement (one `float3` per pack-order point,
+    /// stride 16 bytes). Bound at `Custom8` on the depth + color passes when
+    /// `ComputeRasteriserConfiguration.applyDisplacement == true`.
+    public var displacementBuffer: MTLBuffer?
+
+    /// Allocate a `pointCount * stride(float3)` buffer suitable for use as
+    /// `displacementBuffer`. Caller owns the buffer; fill it from a compute
+    /// kernel each frame (or once, for static displacement).
+    public func makeDisplacementBuffer(
+        storage: MTLStorageMode = .private,
+        label: String? = nil
+    ) -> MTLBuffer? {
+        guard pointCount > 0 else { return nil }
+        let length = pointCount * MemoryLayout<SIMD3<Float>>.stride
+        let buffer = context.device.makeBuffer(length: length, options: storage == .private ? .storageModePrivate : .storageModeShared)
+        buffer?.label = label ?? "\(self.label).Displacement"
+        return buffer
+    }
+
     public var batchCount: Int { packed.batchCount }
     public var pointCount: Int { packed.pointCount }
 

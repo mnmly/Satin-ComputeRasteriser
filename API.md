@@ -77,6 +77,87 @@ cloud.position = [0, 0, -2]
 cloud.scale = [2, 2, 2]
 ```
 
+### Per-point displacement (animated noise, deformers, jitter)
+
+`ComputeRasteriserPointCloud.displacementBuffer` is an optional `MTLBuffer`
+of `float3` deltas (stride 16, one entry per pack-order `pointIndex`).
+When `ComputeRasteriserConfiguration.applyDisplacement == true`, the
+**DepthPass** and **ColorPass** kernels add `displacements[pointIndex]` to
+each decoded position *before* projection. Both passes see the same
+delta, so depth and color land on the same pixel.
+
+Only the `.highQualityAverage` mode honors displacement today; the
+`.nearestPoint` path is unchanged.
+
+**Recipe — fill displacement from a custom compute kernel each frame:**
+
+```swift
+// 1. Pack. PackedPointCloud.orderedPositions is the user's original
+//    positions reordered into pack-order — the same index the rasteriser
+//    uses, so a displacement kernel can read them 1:1.
+let packed = PackedPointCloudFixtures.pack(positions: positions, colors: colors)
+let cloud = ComputeRasteriserPointCloud(context: context, packed: packed)
+
+let originalBuf = packed.orderedPositions.withUnsafeBytes { bytes in
+    device.makeBuffer(
+        bytes: bytes.baseAddress!,
+        length: packed.orderedPositions.count * MemoryLayout<SIMD3<Float>>.stride,
+        options: .storageModeShared
+    )
+}
+
+// 2. Allocate the displacement buffer the rasteriser will read.
+//    `.private` storage is fine — only the GPU touches it.
+cloud.displacementBuffer = cloud.makeDisplacementBuffer(storage: .private)
+rasteriser.addPointCloud(cloud)
+
+// 3. Enable on the rasteriser.
+rasteriser.configuration.applyDisplacement = true
+
+// 4. Every frame, before super.draw(...), encode your kernel that reads
+//    originalBuf and writes deltas into cloud.displacementBuffer. Metal
+//    serializes compute → compute on the same command buffer, so the
+//    rasteriser's depth/color passes see your writes.
+```
+
+Custom kernel signature:
+
+```metal
+kernel void computeDisplacement(
+    device const float3 *originalPositions [[buffer(0)]],
+    device       float3 *displacements     [[buffer(1)]],
+    constant     NoiseParams &noise        [[buffer(2)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id >= noise.count) return;
+    const float3 p = originalPositions[id];
+    displacements[id] = snoise3(p * noise.freq) * noise.amp;
+}
+```
+
+Notes / gotchas:
+
+- **Deltas, not absolute positions.** The shader does `point += delta`
+  after `decodePoint`. Writing the displaced position into the buffer
+  would double-up the original.
+- **Pack-order indexing.** The Morton sort inside `pack(...)` reorders
+  points. `packed.orderedPositions[i]` is the original position for
+  pack-order index `i`, which is also the index the rasteriser shader
+  uses. Indexing by the user's pre-pack array order will scramble the
+  result.
+- **Frustum culling sees undisplaced bounds.** Large displacements can
+  push points outside their batch's AABB and trigger pops at the edge of
+  the view. Disable `enableFrustumCulling` or pad your batch bounds if
+  you go beyond ~one batch radius.
+- **Metal validation.** `displacementBuffer` must be bound at the
+  `Custom8` slot whenever the depth/color processors run; the
+  rasteriser binds `xyzLowBuffer` as a harmless stand-in when the cloud
+  has no real displacement buffer, so `applyDisplacement = false` works
+  with any cloud.
+- **Static displacement** (e.g. one-shot scatter) works the same way —
+  populate `displacementBuffer` once at load time and leave
+  `applyDisplacement = true`.
+
 ### `PackedPointCloud`
 
 `PackedPointCloud` is CPU-side packed point data.
@@ -89,8 +170,15 @@ public struct PackedPointCloud {
     public var xyzMed: [UInt32]
     public var xyzHigh: [UInt32]
     public var colors: [UInt32]
+    public var levels: [UInt8]
     public var boundsMin: SIMD3<Float>
     public var boundsMax: SIMD3<Float>
+    /// Original positions reordered into pack-order. Filled by
+    /// `PackedPointCloudFixtures.pack(...)`. Empty when a loader didn't
+    /// preserve them (e.g. paged PLY loaders). Useful for keying a
+    /// per-point displacement buffer to the same indices the rasteriser
+    /// reads.
+    public var orderedPositions: [SIMD3<Float>]
 }
 ```
 
@@ -119,6 +207,10 @@ public struct ComputeRasteriserConfiguration {
     public var minimumPointSize: Float
     public var maximumPointSize: Float
     public var pointSizeScale: Float
+    /// When true, the depth + color passes add a per-point `float3` from
+    /// `cloud.displacementBuffer` (Custom8) after decoding the position.
+    /// See "Per-point displacement" above.
+    public var applyDisplacement: Bool
 }
 ```
 

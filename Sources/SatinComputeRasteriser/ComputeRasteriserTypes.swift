@@ -33,6 +33,10 @@ public struct ComputeRasteriserConfiguration: Sendable {
     public var minimumPointSize: Float
     public var maximumPointSize: Float
     public var pointSizeScale: Float
+    /// If true, the depth/color passes add per-point `displacementBuffer[i]`
+    /// (in cloud pack-order) to the decoded position before projection.
+    /// Only honored in `.highQualityAverage` mode for now.
+    public var applyDisplacement: Bool
 
     public init(
         mode: ComputeRasteriserMode = .highQualityAverage,
@@ -47,7 +51,8 @@ public struct ComputeRasteriserConfiguration: Sendable {
         pointSizeMode: PointSizeMode = .screenSpace,
         minimumPointSize: Float = 1.0,
         maximumPointSize: Float = 1.0,
-        pointSizeScale: Float = 1.0
+        pointSizeScale: Float = 1.0,
+        applyDisplacement: Bool = false
     ) {
         self.mode = mode
         self.depthTolerance = depthTolerance
@@ -62,6 +67,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.minimumPointSize = minimumPointSize
         self.maximumPointSize = maximumPointSize
         self.pointSizeScale = pointSizeScale
+        self.applyDisplacement = applyDisplacement
     }
 }
 
@@ -156,6 +162,11 @@ public struct PackedPointCloud: Sendable {
     public var levels: [UInt8]
     public var boundsMin: SIMD3<Float>
     public var boundsMax: SIMD3<Float>
+    /// Original `[SIMD3<Float>]` reordered into pack order (Morton-sorted).
+    /// Empty when a loader didn't preserve them (e.g. PLY paged loaders).
+    /// Use this to populate a per-point displacement buffer keyed by the same
+    /// `pointIndex` the rasteriser shader uses.
+    public var orderedPositions: [SIMD3<Float>]
 
     public var pointCount: Int { colors.count }
     public var batchCount: Int { batches.count }
@@ -169,7 +180,8 @@ public struct PackedPointCloud: Sendable {
         colors: [UInt32],
         levels: [UInt8],
         boundsMin: SIMD3<Float>,
-        boundsMax: SIMD3<Float>
+        boundsMax: SIMD3<Float>,
+        orderedPositions: [SIMD3<Float>] = []
     ) {
         self.batches = batches
         self.files = files
@@ -180,6 +192,7 @@ public struct PackedPointCloud: Sendable {
         self.levels = levels
         self.boundsMin = boundsMin
         self.boundsMax = boundsMax
+        self.orderedPositions = orderedPositions
     }
 }
 

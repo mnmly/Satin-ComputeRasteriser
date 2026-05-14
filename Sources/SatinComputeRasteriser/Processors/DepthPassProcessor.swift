@@ -35,6 +35,10 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         didSet { set("lodDither", lodDither ? 1 : 0) }
     }
 
+    public var applyDisplacement: Bool = false {
+        didSet { set("applyDisplacement", applyDisplacement ? 1 : 0) }
+    }
+
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
     public var xyzLowBuffer: MTLBuffer? { didSet { set(xyzLowBuffer, index: .Custom1) } }
     public var xyzMedBuffer: MTLBuffer? { didSet { set(xyzMedBuffer, index: .Custom2) } }
@@ -43,6 +47,10 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
     public var pixelBuffer: MTLBuffer? { didSet { set(pixelBuffer, index: .Custom5) } }
     public var levelsBuffer: MTLBuffer? { didSet { set(levelsBuffer, index: .Custom6) } }
     public var visibleBatchesBuffer: MTLBuffer? { didSet { set(visibleBatchesBuffer, index: .Custom7) } }
+    /// Per-point `float3` displacement, indexed by pack-order `pointIndex`.
+    /// Must be set (to either a real buffer or `xyzLowBuffer` as a stand-in)
+    /// for Metal validation even when `applyDisplacement` is false.
+    public var displacementBuffer: MTLBuffer? { didSet { set(displacementBuffer, index: .Custom8) } }
 
     public var indirectArgsBuffer: MTLBuffer?
     public var indirectArgsBufferOffset: Int = 0
@@ -57,6 +65,7 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         set("maximumPointSize", maximumPointSize)
         set("pointSizeScale", pointSizeScale)
         set("lodDither", lodDither ? 1 : 0)
+        set("applyDisplacement", applyDisplacement ? 1 : 0)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
@@ -68,6 +77,7 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
                 && pixelBuffer != nil
                 && levelsBuffer != nil
                 && visibleBatchesBuffer != nil
+                && displacementBuffer != nil
                 && indirectArgsBuffer != nil
         )
     }

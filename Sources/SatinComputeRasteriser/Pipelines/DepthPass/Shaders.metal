@@ -9,6 +9,7 @@ struct DepthPassUniforms {
     float maximumPointSize;
     float pointSizeScale;
     int lodDither;
+    int applyDisplacement;
 };
 
 kernel void depthPassUpdate(
@@ -21,6 +22,7 @@ kernel void depthPassUpdate(
     device RasterPixel *pixels [[buffer(ComputeBufferCustom5)]],
     device const uchar *levels [[buffer(ComputeBufferCustom6)]],
     device const VisibleBatch *visible [[buffer(ComputeBufferCustom7)]],
+    device const float3 *displacements [[buffer(ComputeBufferCustom8)]],
     uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
@@ -43,7 +45,10 @@ kernel void depthPassUpdate(
         if (dither >= lodThreshold - pointLevel + 0.5) {
             continue;
         }
-        const float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
+        float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
+        if (uniforms.applyDisplacement != 0) {
+            point += displacements[pointIndex];
+        }
         float4 clip = file.transform * float4(point, 1.0);
         if (clip.w <= 0.0) {
             continue;

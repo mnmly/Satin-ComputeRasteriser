@@ -138,7 +138,8 @@ public enum PackedPointCloudFixtures {
             colors: packedColors,
             levels: levels,
             boundsMin: boundsMin,
-            boundsMax: boundsMax
+            boundsMax: boundsMax,
+            orderedPositions: sortedPositions
         )
     }
 }

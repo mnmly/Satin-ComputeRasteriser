@@ -34,6 +34,7 @@ open class ColorPassProcessor: DepthPassProcessor {
                 && pixelBuffer != nil
                 && levelsBuffer != nil
                 && visibleBatchesBuffer != nil
+                && displacementBuffer != nil
                 && indirectArgsBuffer != nil
         )
     }

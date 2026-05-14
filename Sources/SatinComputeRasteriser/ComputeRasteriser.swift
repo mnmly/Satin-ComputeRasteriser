@@ -118,6 +118,9 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             processor.lodDither = configuration.enableLODDither
         }
 
+        depthProcessor.applyDisplacement = configuration.applyDisplacement
+        colorProcessor.applyDisplacement = configuration.applyDisplacement
+
         colorProcessor.depthTolerance = configuration.depthTolerance
         colorProcessor.colorizeChunks = configuration.colorizeChunks
         colorProcessor.colorizeOverdraw = configuration.colorizeOverdraw
@@ -178,9 +181,11 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             guard runCullPass(commandBuffer, cloud: cloud) else { continue }
 
             bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
+            bindDisplacement(cloud, to: depthProcessor)
             depthProcessor.update(commandBuffer)
 
             bind(cloud, to: colorProcessor, pixelBuffer: pixelBuffer)
+            bindDisplacement(cloud, to: colorProcessor)
             colorProcessor.colorsBuffer = cloud.colorsBuffer
             colorProcessor.update(commandBuffer)
         }
@@ -261,6 +266,15 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         processor.levelsBuffer = cloud.levelsBuffer
         processor.visibleBatchesBuffer = cloud.visibleBatchesBuffer
         processor.indirectArgsBuffer = cloud.cullIndirectArgsBuffer
+    }
+
+    /// DepthPass + ColorPass both read displacement at Custom8. NearestDepth /
+    /// NearestIndex use Custom8 for other data, so we set displacement only on
+    /// the two HQ-average processors. Custom8 must always be bound for Metal
+    /// validation — fall back to `xyzLowBuffer` when the user hasn't supplied a
+    /// real displacement buffer; the shader gates reads on `applyDisplacement`.
+    private func bindDisplacement(_ cloud: ComputeRasteriserPointCloud, to processor: DepthPassProcessor) {
+        processor.displacementBuffer = cloud.displacementBuffer ?? cloud.xyzLowBuffer
     }
 
     private func resizeResources() {
