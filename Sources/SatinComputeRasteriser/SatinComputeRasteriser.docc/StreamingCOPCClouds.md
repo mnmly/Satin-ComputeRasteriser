@@ -1,7 +1,7 @@
 # Streaming COPC clouds
 
-Drive ``ComputeRasteriserPointCloud`` from an out-of-core source so the
-working set stays under VRAM regardless of file size.
+Drive a point cloud from an out-of-core source so the working set
+stays under VRAM regardless of file size.
 
 ## Overview
 

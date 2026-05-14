@@ -73,6 +73,7 @@ mirrored in SwiftPDAL's `ChunkPacker` so streamed chunks are upload-ready.
 ### Guides
 
 - <doc:StreamingCOPCClouds>
+- <doc:ConvertingPLYToCOPC>
 
 ### Reference
 
