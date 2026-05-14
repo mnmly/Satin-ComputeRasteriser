@@ -7,7 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		991264CA2FB66479003B2067 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 991264C92FB66479003B2067 /* SatinComputeRasteriser */; };
 		99A1D91F2FB30FC200CA3897 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */; };
+		AABCDEF000000000000001A1 /* SwiftPDAL in Frameworks */ = {isa = PBXBuildFile; productRef = AABCDEF000000000000001C3 /* SwiftPDAL */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,7 +29,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				991264CA2FB66479003B2067 /* SatinComputeRasteriser in Frameworks */,
 				99A1D91F2FB30FC200CA3897 /* SatinComputeRasteriser in Frameworks */,
+				AABCDEF000000000000001A1 /* SwiftPDAL in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +75,8 @@
 			name = SatinComputeRasteriserApp;
 			packageProductDependencies = (
 				99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */,
+				991264C92FB66479003B2067 /* SatinComputeRasteriser */,
+				AABCDEF000000000000001C3 /* SwiftPDAL */,
 			);
 			productName = SatinComputeRasteriserApp;
 			productReference = 99A1D90F2FB30FA700CA3897 /* SatinComputeRasteriserApp.app */;
@@ -101,7 +107,8 @@
 			mainGroup = 99A1D9062FB30FA700CA3897;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				99A1D91D2FB30FC200CA3897 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */,
+				991264C82FB66479003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */,
+				AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 99A1D9102FB30FA700CA3897 /* Products */;
@@ -262,6 +269,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
+				"EXCLUDED_ARCHS[sdk=macosx*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -278,6 +286,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -cxx-interoperability-mode=default";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mnmly.SatinComputeRasteriserApp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -306,6 +315,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
+				"EXCLUDED_ARCHS[sdk=macosx*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -322,6 +332,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -cxx-interoperability-mode=default";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mnmly.SatinComputeRasteriserApp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -362,16 +373,36 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		99A1D91D2FB30FC200CA3897 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */ = {
+		991264C82FB66479003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../Satin-ComputeRasteriser";
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mnmly/SwiftPDAL";
+			requirement = {
+				kind = exactVersion;
+				version = 1.1.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
+		991264C92FB66479003B2067 /* SatinComputeRasteriser */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SatinComputeRasteriser;
+		};
 		99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SatinComputeRasteriser;
+		};
+		AABCDEF000000000000001C3 /* SwiftPDAL */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */;
+			productName = SwiftPDAL;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

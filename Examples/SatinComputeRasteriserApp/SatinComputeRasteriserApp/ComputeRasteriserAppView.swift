@@ -7,6 +7,7 @@ public struct ComputeRasteriserAppView: View {
     @ObservedObject private var appState: ComputeRasteriserAppState
     private let renderer: ComputeRasteriserAppRenderer
     @State private var isImporterPresented = false
+    @State private var isCOPCImporterPresented = false
 
     public init(renderer: ComputeRasteriserAppRenderer) {
         self.renderer = renderer
@@ -21,6 +22,11 @@ public struct ComputeRasteriserAppView: View {
                     Button("Open PLY") {
                         isImporterPresented = true
                     }
+                    #if canImport(SwiftPDAL)
+                    Button("Open COPC") {
+                        isCOPCImporterPresented = true
+                    }
+                    #endif
                     Picker("Mode", selection: Binding(
                         get: { appState.mode },
                         set: { renderer.setMode($0) }
@@ -92,6 +98,26 @@ public struct ComputeRasteriserAppView: View {
                     )
                     .frame(width: 150)
                 }
+                #if canImport(SwiftPDAL)
+                if appState.isStreaming {
+                    HStack(spacing: 10) {
+                        Text("Streaming:")
+                        Text("\(appState.streamingChunks) chunks")
+                        Text("\(appState.streamingPoints) pts")
+                        Slider(
+                            value: Binding(
+                                get: { Double(appState.streamingBudgetMB) },
+                                set: { renderer.setStreamingBudget(MB: Int($0)) }
+                            ),
+                            in: 256 ... 4096,
+                            step: 64
+                        )
+                        .frame(width: 150)
+                        Text("\(appState.streamingBudgetMB) MB budget")
+                            .font(.caption)
+                    }
+                }
+                #endif
             }
             .padding(10)
             .background(.regularMaterial)
@@ -112,9 +138,29 @@ public struct ComputeRasteriserAppView: View {
                 appState.errorMessage = error.localizedDescription
             }
         }
+        #if canImport(SwiftPDAL)
+        .fileImporter(
+            isPresented: $isCOPCImporterPresented,
+            allowedContentTypes: [.copcLAZ],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case let .success(urls):
+                if let url = urls.first {
+                    renderer.loadCOPC(url: url)
+                }
+            case let .failure(error):
+                appState.errorMessage = error.localizedDescription
+            }
+        }
+        #endif
     }
 }
 
 extension UTType {
     static let ply = UTType(filenameExtension: "ply") ?? .data
+    /// COPC files use the LAZ extension. The fileImporter shouldn't reject
+    /// `.las` or non-COPC `.laz` either — SwiftPDAL's open call surfaces the
+    /// "not a COPC" error through the standard error path.
+    static let copcLAZ = UTType(filenameExtension: "laz") ?? .data
 }

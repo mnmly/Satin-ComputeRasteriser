@@ -3,6 +3,9 @@ import Metal
 import Satin
 import SatinComputeRasteriser
 import simd
+#if canImport(SwiftPDAL)
+import SwiftPDAL
+#endif
 
 public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var status: String = "Fixture"
@@ -17,6 +20,14 @@ public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var colorizeChunks: Bool = false
     @Published public var holeFillIterations: Int = 0
     @Published public var enableLODDither: Bool = true
+    /// Streaming-mode telemetry. Updated by the StreamingAdapter each frame.
+    /// Zero in non-streaming (PLY/fixture) mode.
+    @Published public var streamingChunks: Int = 0
+    @Published public var streamingPoints: Int = 0
+    /// Streaming budget in MB; the adapter passes this to the source's
+    /// residency decider to cap working-set bytes.
+    @Published public var streamingBudgetMB: Int = 1024
+    @Published public var isStreaming: Bool = false
 
     public init() {}
 }
@@ -24,11 +35,17 @@ public final class ComputeRasteriserAppState: ObservableObject {
 open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable {
     public lazy var renderer = Renderer(context: defaultContext)
     public lazy var rasteriser = ComputeRasteriser(context: defaultContext)
-    public lazy var pointCloud = ComputeRasteriserPointCloud(
+    public private(set) lazy var pointCloud = ComputeRasteriserPointCloud(
         context: defaultContext,
         packed: PackedPointCloudFixtures.cubeGrid(pointsPerAxis: 28)
     )
     public lazy var scene = Object(context: defaultContext, label: "Compute Rasteriser App", [rasteriser])
+
+    private var currentViewport: SIMD2<Float> = SIMD2(800, 600)
+
+    #if canImport(SwiftPDAL)
+    private var streamingAdapter: StreamingAdapter?
+    #endif
     public lazy var camera = PerspectiveCamera(
         context: defaultContext,
         position: [0.0, 0.0, 2.4],
@@ -77,6 +94,15 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
 
     open override func update() {
         cameraController?.update()
+        #if canImport(SwiftPDAL)
+        if let adapter = streamingAdapter {
+            adapter.update(camera: camera, viewport: currentViewport)
+            DispatchQueue.main.async { [appState, chunks = adapter.residentChunks, points = adapter.residentPoints] in
+                appState.streamingChunks = chunks
+                appState.streamingPoints = points
+            }
+        }
+        #endif
     }
 
     open override func cleanup() {
@@ -100,6 +126,7 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         cameraController?.resize(size)
         renderer.resize(size)
         rasteriser.resize(size: size, scaleFactor: scaleFactor)
+        currentViewport = SIMD2(size.width, size.height)
     }
 
     public func loadPLY(url: URL) {
@@ -124,6 +151,82 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
             }
         }
     }
+
+    #if canImport(SwiftPDAL)
+    /// Open a COPC LAZ file as a streaming source, swap the rendered cloud,
+    /// and frame the camera to its bounds. The previous (PLY/fixture) cloud
+    /// is removed from the rasteriser.
+    public func loadCOPC(url: URL) {
+        let budgetBytes = max(64, appState.streamingBudgetMB) * 1024 * 1024
+        Task.detached { [weak self] in
+            guard let self else { return }
+            let shouldStop = url.startAccessingSecurityScopedResource()
+            defer {
+                if shouldStop { url.stopAccessingSecurityScopedResource() }
+            }
+            do {
+                let source = try await SwiftPDAL.CopcStreamingPointCloudSource.open(url)
+                source.setBudget(budgetBytes)
+                await MainActor.run {
+                    self.installStreamingSource(source, url: url, budgetBytes: budgetBytes)
+                }
+            } catch {
+                await MainActor.run {
+                    self.appState.errorMessage = "COPC open failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    public func setStreamingBudget(MB: Int) {
+        let bytes = max(64, MB) * 1024 * 1024
+        DispatchQueue.main.async { [appState] in appState.streamingBudgetMB = MB }
+        streamingAdapter?.setBudget(bytes: bytes)
+    }
+
+    @MainActor
+    private func installStreamingSource(_ source: SwiftPDAL.CopcStreamingPointCloudSource, url: URL, budgetBytes: Int) {
+        // Tear down the existing cloud + adapter.
+        streamingAdapter?.close()
+        streamingAdapter = nil
+        rasteriser.removePointCloud(pointCloud)
+
+        // Pool capacity: cap by budget so we don't oversubscribe VRAM. 17 B/point
+        // × pointsPerBatch is the per-slot byte cost; pick maxResidentBatches
+        // that fits under budget but caps at 16K so the cull dispatch stays sane.
+        let pointsPerBatch = source.info.pointsPerBatch
+        let bytesPerSlot = pointsPerBatch * 17
+        let slotsByBudget = max(1, budgetBytes / max(1, bytesPerSlot))
+        let cap = ComputeRasteriserCapacity(
+            maxResidentBatches: min(slotsByBudget, 16384),
+            pointsPerBatch: pointsPerBatch
+        )
+
+        let originShift = SIMD3<Float>(
+            Float(source.info.originShift.x),
+            Float(source.info.originShift.y),
+            Float(source.info.originShift.z)
+        )
+        let cloud = ComputeRasteriserPointCloud(
+            context: defaultContext,
+            capacity: cap,
+            originShift: originShift,
+            label: "ComputeRasteriserPointCloud.Streaming"
+        )
+        pointCloud = cloud
+        rasteriser.addPointCloud(cloud)
+
+        let adapter = StreamingAdapter(source: source, cloud: cloud, pixelScale: currentViewport.y * 0.5)
+        streamingAdapter = adapter
+
+        frameCamera(toBoundsMin: source.info.bounds.min, boundsMax: source.info.bounds.max)
+        appState.status = url.lastPathComponent
+        appState.errorMessage = nil
+        appState.isStreaming = true
+        appState.streamingChunks = 0
+        appState.streamingPoints = 0
+    }
+    #endif
 
     public func setLODBias(_ bias: Int) {
         rasteriser.configuration.lodBias = bias
@@ -194,8 +297,12 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
     }
 
     private func frameCamera(to packed: PackedPointCloud) {
-        let center = (packed.boundsMin + packed.boundsMax) * 0.5
-        let extent = packed.boundsMax - packed.boundsMin
+        frameCamera(toBoundsMin: packed.boundsMin, boundsMax: packed.boundsMax)
+    }
+
+    private func frameCamera(toBoundsMin boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>) {
+        let center = (boundsMin + boundsMax) * 0.5
+        let extent = boundsMax - boundsMin
         let radius = max(simd_length(extent) * 0.5, 0.01)
         let distance = radius / max(tan(camera.fov * 0.5 * .pi / 180.0), 0.001)
         let position = center + SIMD3<Float>(0.0, 0.0, distance * 1.35)
