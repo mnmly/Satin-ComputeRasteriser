@@ -83,11 +83,17 @@ public struct ComputeRasteriserAppView: View {
                         set: { renderer.setColorizeChunks($0) }
                     ))
                     .toggleStyle(.switch)
+                    Toggle("CLOD", isOn: Binding(
+                        get: { appState.enableCLOD },
+                        set: { renderer.setCLOD($0) }
+                    ))
+                    .toggleStyle(.switch)
                     Toggle("LOD dither", isOn: Binding(
                         get: { appState.enableLODDither },
                         set: { renderer.setLODDither($0) }
                     ))
                     .toggleStyle(.switch)
+                    .disabled(!appState.enableCLOD)
                     Stepper(
                         "Hole fill: \(appState.holeFillIterations)",
                         value: Binding(

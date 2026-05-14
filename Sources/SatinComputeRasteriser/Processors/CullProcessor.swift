@@ -27,6 +27,12 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
         didSet { set("lodBias", lodBias) }
     }
 
+    /// CLOD master switch. When `false`, the shader writes a sentinel
+    /// `lodThreshold` so downstream passes don't cull any points by level.
+    public var enableCLOD: Bool = true {
+        didSet { set("enableCLOD", enableCLOD ? 1 : 0) }
+    }
+
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
     public var filesBuffer: (any BindableBuffer)? { didSet { set(filesBuffer, index: .Custom1) } }
     public var visibleBuffer: MTLBuffer? { didSet { set(visibleBuffer, index: .Custom2) } }
@@ -40,6 +46,7 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
         set("projectionMatrix", projectionMatrix)
         set("enableFrustumCulling", enableFrustumCulling ? 1 : 0)
         set("lodBias", lodBias)
+        set("enableCLOD", enableCLOD ? 1 : 0)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {

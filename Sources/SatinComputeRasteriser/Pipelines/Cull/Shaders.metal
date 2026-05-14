@@ -11,6 +11,7 @@ struct CullUniforms {
     int batchCount;
     int enableFrustumCulling;
     int lodBias;
+    int enableCLOD;
 };
 
 kernel void cullUpdate(
@@ -48,7 +49,12 @@ kernel void cullUpdate(
     else if (pixelSize < 10000.0) level = 1;
     else level = 0;
 
-    const float lodThreshold = max(0.0, lodThresholdFromPixelSize(pixelSize, uniforms.lodBias));
+    // CLOD off: sentinel that's always ≥ dither(1.0) + pointLevel(7) + 0.5,
+    // so the depth/color/nearest passes' `dither >= lodThreshold - pointLevel + 0.5`
+    // test never culls.
+    const float lodThreshold = (uniforms.enableCLOD != 0)
+        ? max(0.0, lodThresholdFromPixelSize(pixelSize, uniforms.lodBias))
+        : 99.0;
     const uint slot = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
     visible[slot].batchIndex = gid;
     visible[slot].level = level;

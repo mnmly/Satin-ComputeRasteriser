@@ -131,6 +131,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         cullProcessor.projectionMatrix = camera.projectionMatrix
         cullProcessor.enableFrustumCulling = configuration.enableFrustumCulling
         cullProcessor.lodBias = configuration.lodBias
+        cullProcessor.enableCLOD = configuration.enableCLOD
 
         for processor in [depthProcessor, nearestDepthProcessor, nearestIndexProcessor, colorProcessor] {
             processor.screenSize = screenSize
@@ -396,6 +397,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestResolveProcessor.backgroundColor = configuration.backgroundColor
         cullProcessor.enableFrustumCulling = configuration.enableFrustumCulling
         cullProcessor.lodBias = configuration.lodBias
+        cullProcessor.enableCLOD = configuration.enableCLOD
         for processor in [depthProcessor, nearestDepthProcessor, nearestIndexProcessor, colorProcessor] {
             processor.pointSizeMode = configuration.pointSizeMode
             processor.minimumPointSize = configuration.minimumPointSize

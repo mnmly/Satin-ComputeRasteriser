@@ -25,6 +25,12 @@ public struct ComputeRasteriserConfiguration: Sendable {
     public var backgroundColor: SIMD4<Float>
     public var enableFrustumCulling: Bool
     public var lodBias: Int
+    /// Continuous LOD master switch. When `false`, the cull pass writes a
+    /// sentinel `lodThreshold` so the depth/color/nearest passes draw every
+    /// resident point regardless of its precomputed level — useful for
+    /// comparing the streamed-cloud look against an "all points always"
+    /// renderer. ``lodBias`` and ``enableLODDither`` are ignored when off.
+    public var enableCLOD: Bool
     public var enableLODDither: Bool
     public var holeFillIterations: Int
     public var colorizeChunks: Bool
@@ -44,6 +50,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         backgroundColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.0, 0.0, 0.0),
         enableFrustumCulling: Bool = true,
         lodBias: Int = 0,
+        enableCLOD: Bool = true,
         enableLODDither: Bool = true,
         holeFillIterations: Int = 0,
         colorizeChunks: Bool = false,
@@ -59,6 +66,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.backgroundColor = backgroundColor
         self.enableFrustumCulling = enableFrustumCulling
         self.lodBias = lodBias
+        self.enableCLOD = enableCLOD
         self.enableLODDither = enableLODDither
         self.holeFillIterations = holeFillIterations
         self.colorizeChunks = colorizeChunks

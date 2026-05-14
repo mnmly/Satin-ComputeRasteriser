@@ -19,6 +19,7 @@ public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var enableFrustumCulling: Bool = true
     @Published public var colorizeChunks: Bool = false
     @Published public var holeFillIterations: Int = 0
+    @Published public var enableCLOD: Bool = true
     @Published public var enableLODDither: Bool = true
     /// Streaming-mode telemetry. Updated by the StreamingAdapter each frame.
     /// Zero in non-streaming (PLY/fixture) mode.
@@ -81,6 +82,7 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.configuration.enableFrustumCulling = appState.enableFrustumCulling
         rasteriser.configuration.colorizeChunks = appState.colorizeChunks
         rasteriser.configuration.holeFillIterations = appState.holeFillIterations
+        rasteriser.configuration.enableCLOD = appState.enableCLOD
         rasteriser.configuration.enableLODDither = appState.enableLODDither
         camera.lookAt(target: .zero)
         cameraController = PerspectiveCameraController(camera: camera, view: metalView)
@@ -279,6 +281,13 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.configuration.enableLODDither = enabled
         DispatchQueue.main.async { [appState] in
             appState.enableLODDither = enabled
+        }
+    }
+
+    public func setCLOD(_ enabled: Bool) {
+        rasteriser.configuration.enableCLOD = enabled
+        DispatchQueue.main.async { [appState] in
+            appState.enableCLOD = enabled
         }
     }
 
