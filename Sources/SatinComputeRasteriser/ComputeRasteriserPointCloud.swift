@@ -166,6 +166,13 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     ///     `Float` precision) land at their original world coordinates.
     ///   - originShift: convenience translation baked into `files[0].world`
     ///     when `files` is left at its default. Ignored if `files` is non-default.
+    ///     **Precision warning:** large values (≥ ~10⁵) cause FP32 precision
+    ///     loss in the `viewMatrix * world` product because both the camera
+    ///     and the file translation end up in absolute world space. For
+    ///     georeferenced clouds (LAS/LAZ in projected CRS), prefer leaving
+    ///     this `.zero` and rendering in pre-shifted source coordinates;
+    ///     the streaming source already pre-shifts chunk positions to be
+    ///     near origin.
     ///   - label: human-readable label, used as the prefix on Metal buffer labels.
     public init(
         context: Context,

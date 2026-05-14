@@ -202,7 +202,14 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
             pointsPerBatch: pointsPerBatch
         )
 
-        let originShift = SIMD3<Float>(
+        // The source pre-shifts every chunk's positions by `info.originShift`
+        // so they're small FP32-safe values centered near origin. We deliberately
+        // do NOT bake originShift back into RasterFile.world — that would
+        // re-translate to absolute world coords (e.g. ~640K for Autzen's Oregon
+        // State Plane), and the subsequent `viewMatrix * world` would combine
+        // two huge translations and lose ~6 decimal digits of precision per
+        // axis. Render in shifted space; frame the camera there too.
+        let originShiftF = SIMD3<Float>(
             Float(source.info.originShift.x),
             Float(source.info.originShift.y),
             Float(source.info.originShift.z)
@@ -210,7 +217,6 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         let cloud = ComputeRasteriserPointCloud(
             context: defaultContext,
             capacity: cap,
-            originShift: originShift,
             label: "ComputeRasteriserPointCloud.Streaming"
         )
         pointCloud = cloud
@@ -219,7 +225,9 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         let adapter = StreamingAdapter(source: source, cloud: cloud, pixelScale: currentViewport.y * 0.5)
         streamingAdapter = adapter
 
-        frameCamera(toBoundsMin: source.info.bounds.min, boundsMax: source.info.bounds.max)
+        let shiftedMin = source.info.bounds.min - originShiftF
+        let shiftedMax = source.info.bounds.max - originShiftF
+        frameCamera(toBoundsMin: shiftedMin, boundsMax: shiftedMax)
         appState.status = url.lastPathComponent
         appState.errorMessage = nil
         appState.isStreaming = true
