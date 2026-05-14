@@ -262,7 +262,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
 
         cullProcessor.batchCount = cloud.batchCount
         cullProcessor.batchesBuffer = cloud.batchesBuffer
-        cullProcessor.filesBuffer = cloud.filesBuffer
+        cullProcessor.filesBuffer = cloud.filesBindable
         cullProcessor.visibleBuffer = visibleBuffer
         cullProcessor.counterBuffer = counterBuffer
         cullProcessor.update(commandBuffer)
@@ -305,7 +305,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         processor.xyzLowBuffer = cloud.xyzLowBuffer
         processor.xyzMedBuffer = cloud.xyzMedBuffer
         processor.xyzHighBuffer = cloud.xyzHighBuffer
-        processor.filesBuffer = cloud.filesBuffer
+        processor.filesBuffer = cloud.filesBindable
         processor.pixelBuffer = pixelBuffer
         processor.levelsBuffer = cloud.levelsBuffer
         processor.visibleBatchesBuffer = cloud.visibleBatchesBuffer

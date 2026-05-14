@@ -6,7 +6,16 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public private(set) var packed: PackedPointCloud
 
     public private(set) var batchesBuffer: MTLBuffer?
+    /// Ring-buffered per-batch transforms. Each `updateFiles(...)` advances
+    /// to the next slot so multiple updates within a single command-buffer
+    /// (stereo: one per eye, or future N-camera setups) write distinct
+    /// regions of the buffer. ``filesBufferOffset`` returns the byte offset
+    /// of the most recent slot — bind at this offset when encoding.
     public private(set) var filesBuffer: MTLBuffer?
+    /// Byte offset of the slot most recently written by ``updateFiles(viewProjection:modelMatrix:frustumTransform:)``.
+    /// Bind ``filesBuffer`` at this offset so the GPU reads the matching
+    /// per-camera transforms when this encode actually executes.
+    public private(set) var filesBufferOffset: Int = 0
     public private(set) var xyzLowBuffer: MTLBuffer?
     public private(set) var xyzMedBuffer: MTLBuffer?
     public private(set) var xyzHighBuffer: MTLBuffer?
@@ -38,6 +47,30 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public var batchCount: Int { packed.batchCount }
     public var pointCount: Int { packed.pointCount }
 
+    /// Number of in-flight `filesBuffer` slots. Sized for stereo (2 cameras
+    /// per frame) × Satin's triple-buffering (3 frames in flight) = 6.
+    /// Filesbuffer per-slot stride is small (≈256 B per RasterFile × file
+    /// count, typically a handful), so the extra memory is trivial.
+    public static let filesBufferSlotCount: Int = Satin.maxBuffersInFlight * 2
+
+    private var filesSlotIndex: Int = -1
+    private var filesSlotStride: Int = 0
+
+    /// `BindableBuffer` view onto the most recently written ``filesBuffer``
+    /// slot. Pass this (not `filesBuffer` directly) to compute processors so
+    /// Satin's bind path reads from the correct ring offset. Sequential
+    /// `updateFiles` calls within one command buffer advance the slot, so
+    /// each encode's bound view points at its own per-camera transforms.
+    public var filesBindable: (any BindableBuffer)? {
+        guard let filesBuffer else { return nil }
+        return FilesSlotView(buffer: filesBuffer, offset: filesBufferOffset)
+    }
+
+    private struct FilesSlotView: BindableBuffer {
+        let buffer: MTLBuffer!
+        let offset: Int
+    }
+
     public init(context: Context, packed: PackedPointCloud, label: String = "ComputeRasteriserPointCloud") {
         self.packed = packed
         super.init(context: context, label: label)
@@ -58,7 +91,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         modelMatrix: simd_float4x4,
         frustumTransform: simd_float4x4? = nil
     ) {
-        guard !packed.files.isEmpty else { return }
+        guard !packed.files.isEmpty, let filesBuffer else { return }
         var files = packed.files
         for index in files.indices {
             let world = modelMatrix * files[index].world
@@ -66,12 +99,23 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             files[index].transformFrustum = (frustumTransform ?? viewProjection) * world
             files[index].world = world
         }
-        updateBuffer(filesBuffer, with: files)
+
+        filesSlotIndex = (filesSlotIndex + 1) % Self.filesBufferSlotCount
+        filesBufferOffset = filesSlotIndex * filesSlotStride
+
+        let byteCount = min(filesSlotStride, files.count * MemoryLayout<RasterFile>.stride)
+        files.withUnsafeBytes { bytes in
+            filesBuffer.contents()
+                .advanced(by: filesBufferOffset)
+                .copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
+        }
     }
 
     private func rebuildBuffers() {
         batchesBuffer = makeBuffer(packed.batches, label: "\(label).Batches")
-        filesBuffer = makeBuffer(packed.files, label: "\(label).Files")
+        filesBuffer = makeFilesRingBuffer(files: packed.files, label: "\(label).Files")
+        filesSlotIndex = -1
+        filesBufferOffset = 0
         xyzLowBuffer = makeBuffer(packed.xyzLow, label: "\(label).XYZLow")
         xyzMedBuffer = makeBuffer(packed.xyzMed, label: "\(label).XYZMed")
         xyzHighBuffer = makeBuffer(packed.xyzHigh, label: "\(label).XYZHigh")
@@ -111,6 +155,23 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             context.device.makeBuffer(bytes: bytes.baseAddress!, length: byteCount, options: .storageModeShared)
         }
         buffer?.label = label
+        return buffer
+    }
+
+    /// `filesBuffer` is sized for N in-flight slots so sequential
+    /// `updateFiles` calls within one command buffer don't clobber each
+    /// other. Slot 0 is seeded with `files` so the first encode that runs
+    /// before `updateFiles` has been called sees the identity-world state.
+    private func makeFilesRingBuffer(files: [RasterFile], label: String) -> MTLBuffer? {
+        guard !files.isEmpty else { return nil }
+        let perSlot = files.count * MemoryLayout<RasterFile>.stride
+        filesSlotStride = perSlot
+        let totalLength = perSlot * Self.filesBufferSlotCount
+        guard let buffer = context.device.makeBuffer(length: totalLength, options: .storageModeShared) else { return nil }
+        buffer.label = label
+        files.withUnsafeBytes { bytes in
+            buffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: perSlot)
+        }
         return buffer
     }
 

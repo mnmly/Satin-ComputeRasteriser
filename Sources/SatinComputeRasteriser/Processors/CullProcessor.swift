@@ -28,7 +28,7 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
     }
 
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
-    public var filesBuffer: MTLBuffer? { didSet { set(filesBuffer, index: .Custom1) } }
+    public var filesBuffer: (any BindableBuffer)? { didSet { set(filesBuffer, index: .Custom1) } }
     public var visibleBuffer: MTLBuffer? { didSet { set(visibleBuffer, index: .Custom2) } }
     public var counterBuffer: MTLBuffer? { didSet { set(counterBuffer, index: .Custom3) } }
 
