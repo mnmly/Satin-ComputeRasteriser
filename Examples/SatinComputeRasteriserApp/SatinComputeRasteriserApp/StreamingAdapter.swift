@@ -57,6 +57,10 @@ public final class StreamingAdapter {
         guard let delta = source.pollLatest() else { return }
 
         // Evictions first so freed slots are available for the new chunks.
+        // Defer the GPU-side flush — one commitBatchUpdates() at the end
+        // of the tick covers both the removes and all the adds, instead of
+        // re-uploading the full batch mirror per chunk.
+        var dirty = false
         var slotsToFree: [Int] = []
         for id in delta.removed {
             if let slots = slotsByChunk.removeValue(forKey: id) {
@@ -64,7 +68,8 @@ public final class StreamingAdapter {
             }
         }
         if !slotsToFree.isEmpty {
-            cloud.removeBatches(slots: slotsToFree)
+            cloud.removeBatches(slots: slotsToFree, commit: false)
+            dirty = true
         }
 
         for chunk in delta.added {
@@ -79,10 +84,14 @@ public final class StreamingAdapter {
                 positionsXYZHigh: chunk.xyzHigh,
                 colors: chunk.colors,
                 levels: chunk.levels,
-                batches: batches
+                batches: batches,
+                commit: false
             )
             slotsByChunk[chunk.id] = slots
+            dirty = true
         }
+
+        if dirty { cloud.commitBatchUpdates() }
 
         residentChunks = slotsByChunk.count
         residentPoints = cloud.pointCount

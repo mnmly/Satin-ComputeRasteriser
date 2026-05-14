@@ -274,6 +274,14 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     ///   ``removeBatches(slots:)`` call can free the right slots.
     /// - Precondition: `freeSlotCount >= batches.count`. Call
     ///   ``removeBatches(slots:)`` first if you'd otherwise overflow.
+    /// - Parameter commit: if `true` (default), the GPU-visible
+    ///   ``batchesBuffer`` is re-uploaded before this call returns. Pass
+    ///   `false` when making many sequential calls (e.g. draining a
+    ///   streaming source's per-frame delta) and call
+    ///   ``commitBatchUpdates()`` once at the end — the per-call upload
+    ///   is `maxResidentBatches × 64 B` regardless of how many slots
+    ///   actually changed, so coalescing is a clear win at large pool
+    ///   sizes.
     @discardableResult
     public func addBatches(
         positionsXYZLow: Data,
@@ -281,7 +289,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         positionsXYZHigh: Data,
         colors: Data,
         levels: Data,
-        batches: [RasterBatch]
+        batches: [RasterBatch],
+        commit: Bool = true
     ) -> [Int] {
         precondition(batches.count <= freeSlots.count, "addBatches: not enough free slots (have \(freeSlots.count), need \(batches.count))")
         guard !batches.isEmpty else { return [] }
@@ -313,14 +322,15 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             pointCount += count
         }
 
-        flushBatchMirror()
+        if commit { flushBatchMirror() }
         return assigned
     }
 
     /// Free the given slots. Their ``RasterBatch/state`` flips to `0` so the
     /// cull kernel skips them next frame; the slots return to the free list
     /// and may be reused by a subsequent `addBatches`.
-    public func removeBatches(slots: [Int]) {
+    /// - Parameter commit: see ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``.
+    public func removeBatches(slots: [Int], commit: Bool = true) {
         guard !slots.isEmpty else { return }
         for slot in slots {
             precondition(slot >= 0 && slot < capacity.maxResidentBatches, "removeBatches: slot \(slot) out of range")
@@ -331,6 +341,17 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             batchMirror[slot].numPoints = 0
             freeSlots.append(slot)
         }
+        if commit { flushBatchMirror() }
+    }
+
+    /// Re-upload the CPU-side batch mirror to the GPU-visible
+    /// ``batchesBuffer``. Use after a series of `commit: false`
+    /// add/remove calls to publish all changes in one shot.
+    ///
+    /// Cheap to call when nothing changed (a single memcpy of
+    /// `maxResidentBatches × 64 B`). For 65K-slot pools coalescing
+    /// avoids ~4 MB of redundant traffic per per-chunk add/remove.
+    public func commitBatchUpdates() {
         flushBatchMirror()
     }
 
