@@ -10,6 +10,23 @@ import Testing
     #expect(MemoryLayout<UInt64>.stride == 8)
 }
 
+// Guards the cross-package memcpy from SwiftPDAL's StreamingRasterBatch into
+// this package's RasterBatch. Field offsets here must match the streaming
+// source's struct exactly; mismatches would silently corrupt batch metadata.
+@Test func rasterBatchFieldOffsetsMatchStreamingLayout() {
+    #expect(MemoryLayout<RasterBatch>.offset(of: \.state) == 0)
+    #expect(MemoryLayout<RasterBatch>.offset(of: \.minX) == 4)
+    #expect(MemoryLayout<RasterBatch>.offset(of: \.maxZ) == 24)
+    #expect(MemoryLayout<RasterBatch>.offset(of: \.numPoints) == 28)
+    #expect(MemoryLayout<RasterBatch>.offset(of: \.firstPoint) == 32)
+    #expect(MemoryLayout<RasterBatch>.offset(of: \.fileIndex) == 36)
+}
+
+@Test func rasterBatchDefaultsToResident() {
+    let batch = RasterBatch(min: .zero, max: .one, numPoints: 1, firstPoint: 0)
+    #expect(batch.state == 1)
+}
+
 @Test func fixturePackingProducesConsistentCounts() {
     let packed = PackedPointCloudFixtures.cubeGrid(pointsPerAxis: 4)
     #expect(packed.pointCount == 64)

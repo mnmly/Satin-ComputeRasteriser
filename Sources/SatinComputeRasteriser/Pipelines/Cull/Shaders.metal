@@ -26,6 +26,10 @@ kernel void cullUpdate(
     }
 
     const RasterBatch batch = batches[gid];
+    // Residency gate: streaming sources mark non-resident slots with state == 0.
+    if (batch.state == 0) {
+        return;
+    }
     const RasterFile file = files[batch.fileIndex];
 
     if (uniforms.enableFrustumCulling != 0) {

@@ -89,7 +89,7 @@ public struct RasterBatch: Sendable {
         numPoints: UInt32,
         firstPoint: UInt32,
         fileIndex: UInt32 = 0,
-        state: Int32 = 0
+        state: Int32 = 1
     ) {
         self.state = state
         self.minX = min.x
