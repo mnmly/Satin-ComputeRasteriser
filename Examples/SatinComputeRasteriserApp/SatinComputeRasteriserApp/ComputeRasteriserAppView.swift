@@ -109,8 +109,8 @@ public struct ComputeRasteriserAppView: View {
                                 get: { Double(appState.streamingBudgetMB) },
                                 set: { renderer.setStreamingBudget(MB: Int($0)) }
                             ),
-                            in: 256 ... 4096,
-                            step: 64
+                            in: 256 ... 16384,
+                            step: 256
                         )
                         .frame(width: 150)
                         Text("\(appState.streamingBudgetMB) MB budget")

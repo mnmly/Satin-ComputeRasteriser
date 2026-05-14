@@ -201,13 +201,15 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.removePointCloud(pointCloud)
 
         // Pool capacity: cap by budget so we don't oversubscribe VRAM. 17 B/point
-        // × pointsPerBatch is the per-slot byte cost; pick maxResidentBatches
-        // that fits under budget but caps at 16K so the cull dispatch stays sane.
+        // × pointsPerBatch is the per-slot byte cost. Hard cap at 65536 slots
+        // (~11 GB at the SwiftPDAL default 10240 pts/batch) to keep the cull
+        // dispatch's per-frame threadgroup count bounded — every slot gets a
+        // threadgroup whether resident or not.
         let pointsPerBatch = source.info.pointsPerBatch
         let bytesPerSlot = pointsPerBatch * 17
         let slotsByBudget = max(1, budgetBytes / max(1, bytesPerSlot))
         let cap = ComputeRasteriserCapacity(
-            maxResidentBatches: min(slotsByBudget, 16384),
+            maxResidentBatches: min(slotsByBudget, 65536),
             pointsPerBatch: pointsPerBatch
         )
 
