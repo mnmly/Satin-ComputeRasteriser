@@ -21,6 +21,22 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private var viewport: SIMD4<Float> = .zero
     private var scaleFactor: Float = 1.0
 
+    /// Cached per-viewport GPU resources. Offline recording alternates between
+    /// the live drawable and the offline target sizes every frame; without a
+    /// cache, each switch reallocates ~`width*height*48 B` for pixelBuffer +
+    /// two RGBA8 output textures (≈200 MB for a 4K target). The cache is
+    /// keyed by integer pixel size and capped — `resizeKeys` tracks LRU order.
+    private struct CachedResources {
+        var pixelBuffer: MTLBuffer
+        var nearestDepthBuffer: MTLBuffer
+        var nearestIndexBuffer: MTLBuffer
+        var outputTexture: MTLTexture
+        var outputTextureB: MTLTexture
+    }
+    private var resourceCache: [SIMD2<Int32>: CachedResources] = [:]
+    private var resourceCacheLRU: [SIMD2<Int32>] = []
+    private static let resourceCacheCap = 4
+
     private lazy var clearProcessor = ClearProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var cullProcessor = CullProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var cullFinalizeProcessor = CullFinalizeProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
@@ -47,10 +63,19 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         return material
     }()
 
+    // colorLoadAction defaults to `.clear` on PostProcessor, which would wipe
+    // the entire render-pass color attachment on every composite call. That
+    // breaks stereo offline rendering (the right-eye composite clears the
+    // left-eye composite) and means the rasteriser unconditionally replaces
+    // any scene content below. `.load` makes it a true overlay: prior scene
+    // pixels are preserved, and the postMaterial's `blending = .alpha` does
+    // the actual composite.
     private lazy var postProcessor = PostProcessor(
         label: "ComputeRasteriserPostProcessor",
         context: context,
-        material: postMaterial
+        material: postMaterial,
+        colorLoadAction: .load,
+        depthLoadAction: .load
     )
 
     public init(context: Context, label: String = "ComputeRasteriser") {
@@ -256,6 +281,25 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         postProcessor.draw(renderPassDescriptor: renderPassDescriptor, commandBuffer: commandBuffer)
     }
 
+    /// Variant that composites onto a specific sub-region of the render target,
+    /// e.g. one eye's half viewport for stereo offline rendering. Forwards to
+    /// Satin's `PostProcessor.draw(viewports:)` which respects the supplied
+    /// viewport instead of the post-processor's internal renderer viewport.
+    public func draw(
+        renderPassDescriptor: MTLRenderPassDescriptor,
+        commandBuffer: MTLCommandBuffer,
+        viewport: MTLViewport
+    ) {
+        let finalTexture = holeFillResultTexture ?? outputTexture
+        guard let finalTexture else { return }
+        postMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
+        postProcessor.draw(
+            renderPassDescriptor: renderPassDescriptor,
+            commandBuffer: commandBuffer,
+            viewports: [viewport]
+        )
+    }
+
     private func bind(_ cloud: ComputeRasteriserPointCloud, to processor: DepthPassProcessor, pixelBuffer: MTLBuffer) {
         processor.batchesBuffer = cloud.batchesBuffer
         processor.xyzLowBuffer = cloud.xyzLowBuffer
@@ -283,24 +327,21 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         let pixelCount = width * height
         guard width > 0, height > 0, pixelCount > 0 else { return }
 
-        pixelBuffer = context.device.makeBuffer(
-            length: pixelCount * MemoryLayout<RasterPixel>.stride,
-            options: .storageModePrivate
-        )
-        pixelBuffer?.label = "\(label).Pixels"
-        nearestDepthBuffer = context.device.makeBuffer(
-            length: pixelCount * MemoryLayout<UInt32>.stride,
-            options: .storageModePrivate
-        )
-        nearestDepthBuffer?.label = "\(label).NearestDepths"
-        nearestIndexBuffer = context.device.makeBuffer(
-            length: pixelCount * MemoryLayout<UInt32>.stride,
-            options: .storageModePrivate
-        )
-        nearestIndexBuffer?.label = "\(label).NearestIndices"
-        outputTexture = makeOutputTexture(width: width, height: height, label: "\(label).Output")
-        outputTextureB = makeOutputTexture(width: width, height: height, label: "\(label).OutputB")
-        holeFillResultTexture = outputTexture
+        let key = SIMD2<Int32>(Int32(width), Int32(height))
+        let resources = resourceCache[key] ?? allocateAndCache(width: width, height: height, key: key)
+
+        // Promote to most-recently-used.
+        if let idx = resourceCacheLRU.firstIndex(of: key) {
+            resourceCacheLRU.remove(at: idx)
+        }
+        resourceCacheLRU.append(key)
+
+        pixelBuffer = resources.pixelBuffer
+        nearestDepthBuffer = resources.nearestDepthBuffer
+        nearestIndexBuffer = resources.nearestIndexBuffer
+        outputTexture = resources.outputTexture
+        outputTextureB = resources.outputTextureB
+        holeFillResultTexture = resources.outputTexture
 
         clearProcessor.pixelCount = pixelCount
         clearWinnerProcessor.pixelCount = pixelCount
@@ -311,6 +352,43 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestResolveProcessor.height = height
         nearestResolveProcessor.backgroundColor = configuration.backgroundColor
         postProcessor.resize(size: (Float(width), Float(height)), scaleFactor: scaleFactor)
+    }
+
+    private func allocateAndCache(width: Int, height: Int, key: SIMD2<Int32>) -> CachedResources {
+        let pixelCount = width * height
+        let pixel = context.device.makeBuffer(
+            length: pixelCount * MemoryLayout<RasterPixel>.stride,
+            options: .storageModePrivate
+        )!
+        pixel.label = "\(label).Pixels[\(width)x\(height)]"
+        let nearestDepth = context.device.makeBuffer(
+            length: pixelCount * MemoryLayout<UInt32>.stride,
+            options: .storageModePrivate
+        )!
+        nearestDepth.label = "\(label).NearestDepths[\(width)x\(height)]"
+        let nearestIndex = context.device.makeBuffer(
+            length: pixelCount * MemoryLayout<UInt32>.stride,
+            options: .storageModePrivate
+        )!
+        nearestIndex.label = "\(label).NearestIndices[\(width)x\(height)]"
+        let outA = makeOutputTexture(width: width, height: height, label: "\(label).Output[\(width)x\(height)]")!
+        let outB = makeOutputTexture(width: width, height: height, label: "\(label).OutputB[\(width)x\(height)]")!
+
+        let resources = CachedResources(
+            pixelBuffer: pixel,
+            nearestDepthBuffer: nearestDepth,
+            nearestIndexBuffer: nearestIndex,
+            outputTexture: outA,
+            outputTextureB: outB
+        )
+        resourceCache[key] = resources
+
+        // Evict oldest if over cap.
+        while resourceCacheLRU.count >= Self.resourceCacheCap {
+            let evict = resourceCacheLRU.removeFirst()
+            resourceCache.removeValue(forKey: evict)
+        }
+        return resources
     }
 
     private func applyConfiguration() {
