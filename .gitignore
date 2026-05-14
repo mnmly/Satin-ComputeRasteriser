@@ -17,3 +17,6 @@ Examples/**/.build/
 # Editor / local environment
 .vscode/
 .idea/
+
+# DocC static-site build output (Scripts/build_docs.sh)
+/docs/
