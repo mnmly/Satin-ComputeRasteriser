@@ -12,6 +12,8 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     }()
 
     public private(set) var outputTexture: MTLTexture?
+    private var outputTextureB: MTLTexture?
+    private var holeFillResultTexture: MTLTexture?
 
     private var pixelBuffer: MTLBuffer?
     private var nearestDepthBuffer: MTLBuffer?
@@ -29,6 +31,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private lazy var nearestDepthProcessor = NearestDepthProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var nearestIndexProcessor = NearestIndexProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
     private lazy var nearestResolveProcessor = NearestResolveProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
+    private lazy var holeFillProcessor = HoleFillProcessor(device: context.device, pipelinesURL: Self.pipelinesURL, live: true)
 
     private lazy var postMaterial: SourceMaterial = {
         let material = SourceMaterial(
@@ -112,6 +115,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             processor.minimumPointSize = configuration.minimumPointSize
             processor.maximumPointSize = configuration.maximumPointSize
             processor.pointSizeScale = configuration.pointSizeScale
+            processor.lodDither = configuration.enableLODDither
         }
 
         colorProcessor.depthTolerance = configuration.depthTolerance
@@ -138,6 +142,31 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             encodeNearestPoint(commandBuffer)
         }
 
+        encodeHoleFill(commandBuffer)
+    }
+
+    private func encodeHoleFill(_ commandBuffer: MTLCommandBuffer) {
+        let iterations = max(0, configuration.holeFillIterations)
+        guard iterations > 0,
+              let source = outputTexture,
+              let target = outputTextureB
+        else {
+            holeFillResultTexture = outputTexture
+            return
+        }
+
+        holeFillProcessor.width = Int(viewport.z)
+        holeFillProcessor.height = Int(viewport.w)
+
+        var src = source
+        var dst = target
+        for _ in 0 ..< iterations {
+            holeFillProcessor.inputTexture = src
+            holeFillProcessor.outputTexture = dst
+            holeFillProcessor.update(commandBuffer)
+            swap(&src, &dst)
+        }
+        holeFillResultTexture = src
     }
 
     private func encodeHighQualityAverage(_ commandBuffer: MTLCommandBuffer, pixelBuffer: MTLBuffer) {
@@ -216,8 +245,9 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     }
 
     public func draw(renderPassDescriptor: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer) {
-        guard let outputTexture else { return }
-        postMaterial.set(outputTexture, index: FragmentTextureIndex.Custom1)
+        let finalTexture = holeFillResultTexture ?? outputTexture
+        guard let finalTexture else { return }
+        postMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
         postProcessor.draw(renderPassDescriptor: renderPassDescriptor, commandBuffer: commandBuffer)
     }
 
@@ -254,7 +284,9 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             options: .storageModePrivate
         )
         nearestIndexBuffer?.label = "\(label).NearestIndices"
-        outputTexture = makeOutputTexture(width: width, height: height)
+        outputTexture = makeOutputTexture(width: width, height: height, label: "\(label).Output")
+        outputTextureB = makeOutputTexture(width: width, height: height, label: "\(label).OutputB")
+        holeFillResultTexture = outputTexture
 
         clearProcessor.pixelCount = pixelCount
         clearWinnerProcessor.pixelCount = pixelCount
@@ -277,13 +309,14 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             processor.minimumPointSize = configuration.minimumPointSize
             processor.maximumPointSize = configuration.maximumPointSize
             processor.pointSizeScale = configuration.pointSizeScale
+            processor.lodDither = configuration.enableLODDither
         }
         colorProcessor.depthTolerance = configuration.depthTolerance
         colorProcessor.colorizeChunks = configuration.colorizeChunks
         colorProcessor.colorizeOverdraw = configuration.colorizeOverdraw
     }
 
-    private func makeOutputTexture(width: Int, height: Int) -> MTLTexture? {
+    private func makeOutputTexture(width: Int, height: Int, label: String) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm,
             width: width,
@@ -293,7 +326,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
         descriptor.storageMode = .private
         let texture = context.device.makeTexture(descriptor: descriptor)
-        texture?.label = "\(label).Output"
+        texture?.label = label
         return texture
     }
 }

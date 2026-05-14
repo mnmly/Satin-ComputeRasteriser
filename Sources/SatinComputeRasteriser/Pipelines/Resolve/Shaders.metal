@@ -18,7 +18,7 @@ kernel void resolveUpdate(
     const uint pixelIndex = gid.y * uint(uniforms.screenSize.x) + gid.x;
     const RasterPixel pixel = pixels[pixelIndex];
     if (pixel.count == 0u) {
-        outputTexture.write(uniforms.backgroundColor, gid);
+        outputTexture.write(float4(uniforms.backgroundColor.rgb, 0.0), gid);
         return;
     }
 

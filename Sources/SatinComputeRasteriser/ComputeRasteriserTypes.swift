@@ -25,6 +25,8 @@ public struct ComputeRasteriserConfiguration: Sendable {
     public var backgroundColor: SIMD4<Float>
     public var enableFrustumCulling: Bool
     public var lodBias: Int
+    public var enableLODDither: Bool
+    public var holeFillIterations: Int
     public var colorizeChunks: Bool
     public var colorizeOverdraw: Bool
     public var pointSizeMode: PointSizeMode
@@ -38,6 +40,8 @@ public struct ComputeRasteriserConfiguration: Sendable {
         backgroundColor: SIMD4<Float> = SIMD4<Float>(0.0, 0.0, 0.0, 0.0),
         enableFrustumCulling: Bool = true,
         lodBias: Int = 0,
+        enableLODDither: Bool = true,
+        holeFillIterations: Int = 0,
         colorizeChunks: Bool = false,
         colorizeOverdraw: Bool = false,
         pointSizeMode: PointSizeMode = .screenSpace,
@@ -50,6 +54,8 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.backgroundColor = backgroundColor
         self.enableFrustumCulling = enableFrustumCulling
         self.lodBias = lodBias
+        self.enableLODDither = enableLODDither
+        self.holeFillIterations = holeFillIterations
         self.colorizeChunks = colorizeChunks
         self.colorizeOverdraw = colorizeOverdraw
         self.pointSizeMode = pointSizeMode
@@ -180,10 +186,10 @@ public struct PackedPointCloud: Sendable {
 public struct VisibleBatch: Sendable {
     public var batchIndex: UInt32
     public var level: Int32
-    public var lodThreshold: Int32
+    public var lodThreshold: Float
     public var padding: UInt32
 
-    public init(batchIndex: UInt32 = 0, level: Int32 = 0, lodThreshold: Int32 = 0) {
+    public init(batchIndex: UInt32 = 0, level: Int32 = 0, lodThreshold: Float = 0) {
         self.batchIndex = batchIndex
         self.level = level
         self.lodThreshold = lodThreshold

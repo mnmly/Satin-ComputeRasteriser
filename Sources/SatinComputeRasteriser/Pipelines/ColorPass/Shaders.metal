@@ -11,6 +11,7 @@ struct ColorPassUniforms {
     float minimumPointSize;
     float maximumPointSize;
     float pointSizeScale;
+    int lodDither;
 };
 
 kernel void colorPassUpdate(
@@ -32,7 +33,7 @@ kernel void colorPassUpdate(
     const RasterBatch batch = batches[batchIndex];
     const RasterFile file = files[batch.fileIndex];
     const int level = vb.level;
-    const uint lodThreshold = uint(vb.lodThreshold);
+    const float lodThreshold = vb.lodThreshold;
     const uint pointsPerThread = (batch.numPoints + CR_THREADS_PER_GROUP - 1u) / CR_THREADS_PER_GROUP;
 
     for (uint i = 0; i < pointsPerThread; i++) {
@@ -42,8 +43,9 @@ kernel void colorPassUpdate(
         }
 
         const uint pointIndex = batch.firstPoint + localIndex;
-        const uint pointLevel = uint(levels[pointIndex]) & 0x7u;
-        if (pointLevel > lodThreshold) {
+        const float pointLevel = float(uint(levels[pointIndex]) & 0x7u);
+        const float dither = (uniforms.lodDither != 0) ? hashUnit(pointIndex) : 0.5;
+        if (dither >= lodThreshold - pointLevel + 0.5) {
             continue;
         }
         const float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);

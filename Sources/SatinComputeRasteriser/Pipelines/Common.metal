@@ -135,7 +135,7 @@ inline bool intersectsFrustum(float4x4 m, float3 wgMin, float3 wgMax) {
     return true;
 }
 
-inline int precisionLevel(RasterBatch batch, RasterFile file, float4x4 viewMatrix, float4x4 projectionMatrix, int2 imageSize) {
+inline float pixelSizeOnScreen(RasterBatch batch, RasterFile file, float4x4 viewMatrix, float4x4 projectionMatrix, int2 imageSize) {
     const float3 wgMin = batchMin(batch);
     const float3 wgMax = batchMax(batch);
     const float3 wgCenter = (wgMin + wgMax) * 0.5;
@@ -151,11 +151,30 @@ inline int precisionLevel(RasterBatch batch, RasterFile file, float4x4 viewMatri
 
     const float2 screenCenter = float2(imageSize) * (projCenter.xy + 1.0) * 0.5;
     const float2 screenEdge = float2(imageSize) * (projEdge.xy + 1.0) * 0.5;
-    const float pixelSize = distance(screenEdge, screenCenter);
+    return distance(screenEdge, screenCenter);
+}
 
+inline int precisionLevel(RasterBatch batch, RasterFile file, float4x4 viewMatrix, float4x4 projectionMatrix, int2 imageSize) {
+    const float pixelSize = pixelSizeOnScreen(batch, file, viewMatrix, projectionMatrix, imageSize);
     if (pixelSize < 100.0) { return 4; }
     if (pixelSize < 200.0) { return 3; }
     if (pixelSize < 500.0) { return 2; }
     if (pixelSize < 10000.0) { return 1; }
     return 0;
+}
+
+// Continuous LOD threshold: log2-of-pixelSize ramp with a baseline that keeps
+// typical viewing distances at full detail. lodBias shifts the ramp.
+inline float lodThresholdFromPixelSize(float pixelSize, int lodBias) {
+    return log2(max(pixelSize, 1.0) / 25.0) + 3.0 + float(lodBias);
+}
+
+// Cheap deterministic per-point hash → [0, 1). Used for LOD-threshold dither.
+inline float hashUnit(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return float(x) * (1.0 / 4294967296.0);
 }

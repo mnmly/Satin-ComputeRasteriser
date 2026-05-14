@@ -36,13 +36,15 @@ kernel void cullUpdate(
         }
     }
 
-    const int level = precisionLevel(batch, file, uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
-    // Map projected-precision tier to a max LOD that should still render.
-    // Tier 0 (very close) and 1 (moderately close) show all levels.
-    // Tiers 2-4 progressively drop the finest levels.
-    constexpr int lodForPrecision[5] = { 7, 7, 3, 2, 1 };
-    const int tier = clamp(level, 0, 4);
-    const int lodThreshold = max(0, lodForPrecision[tier] + uniforms.lodBias);
+    const float pixelSize = pixelSizeOnScreen(batch, file, uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize);
+    int level;
+    if (pixelSize < 100.0) level = 4;
+    else if (pixelSize < 200.0) level = 3;
+    else if (pixelSize < 500.0) level = 2;
+    else if (pixelSize < 10000.0) level = 1;
+    else level = 0;
+
+    const float lodThreshold = max(0.0, lodThresholdFromPixelSize(pixelSize, uniforms.lodBias));
     const uint slot = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
     visible[slot].batchIndex = gid;
     visible[slot].level = level;

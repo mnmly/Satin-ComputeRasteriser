@@ -31,6 +31,10 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         didSet { set("pointSizeScale", pointSizeScale) }
     }
 
+    public var lodDither: Bool = true {
+        didSet { set("lodDither", lodDither ? 1 : 0) }
+    }
+
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
     public var xyzLowBuffer: MTLBuffer? { didSet { set(xyzLowBuffer, index: .Custom1) } }
     public var xyzMedBuffer: MTLBuffer? { didSet { set(xyzMedBuffer, index: .Custom2) } }
@@ -52,6 +56,7 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         set("minimumPointSize", minimumPointSize)
         set("maximumPointSize", maximumPointSize)
         set("pointSizeScale", pointSizeScale)
+        set("lodDither", lodDither ? 1 : 0)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {

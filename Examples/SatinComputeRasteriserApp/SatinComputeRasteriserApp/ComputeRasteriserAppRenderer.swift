@@ -15,6 +15,8 @@ public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var lodBias: Int = 0
     @Published public var enableFrustumCulling: Bool = true
     @Published public var colorizeChunks: Bool = false
+    @Published public var holeFillIterations: Int = 0
+    @Published public var enableLODDither: Bool = true
 
     public init() {}
 }
@@ -61,6 +63,8 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.configuration.lodBias = appState.lodBias
         rasteriser.configuration.enableFrustumCulling = appState.enableFrustumCulling
         rasteriser.configuration.colorizeChunks = appState.colorizeChunks
+        rasteriser.configuration.holeFillIterations = appState.holeFillIterations
+        rasteriser.configuration.enableLODDither = appState.enableLODDither
         camera.lookAt(target: .zero)
         cameraController = PerspectiveCameraController(camera: camera, view: metalView)
         cameraController?.defaultDistance = 2.4
@@ -139,6 +143,20 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         rasteriser.configuration.colorizeChunks = enabled
         DispatchQueue.main.async { [appState] in
             appState.colorizeChunks = enabled
+        }
+    }
+
+    public func setHoleFillIterations(_ iterations: Int) {
+        rasteriser.configuration.holeFillIterations = iterations
+        DispatchQueue.main.async { [appState] in
+            appState.holeFillIterations = iterations
+        }
+    }
+
+    public func setLODDither(_ enabled: Bool) {
+        rasteriser.configuration.enableLODDither = enabled
+        DispatchQueue.main.async { [appState] in
+            appState.enableLODDither = enabled
         }
     }
 

@@ -21,7 +21,7 @@ kernel void nearestResolveUpdate(
     const uint depth = depths[pixelIndex];
     const uint pointIndex = indices[pixelIndex];
     if (depth == 0u || pointIndex == 0xffffffffu) {
-        outputTexture.write(uniforms.backgroundColor, gid);
+        outputTexture.write(float4(uniforms.backgroundColor.rgb, 0.0), gid);
         return;
     }
 
