@@ -165,7 +165,16 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
                 if shouldStop { url.stopAccessingSecurityScopedResource() }
             }
             do {
-                let source = try await SwiftPDAL.CopcStreamingPointCloudSource.open(url)
+                // 1.2.0: parallel decode via reader pool + faster ticks.
+                // decodeConcurrency = active core count; LAZ decompress is
+                // single-threaded per chunk so going past cores doesn't help.
+                let cores = max(2, ProcessInfo.processInfo.activeProcessorCount)
+                let opts = StreamingOptions(
+                    maxInFlightLoads: cores * 2,
+                    decodeConcurrency: cores,
+                    driverTickInterval: .milliseconds(16)
+                )
+                let source = try await SwiftPDAL.CopcStreamingPointCloudSource.open(url, options: opts)
                 source.setBudget(budgetBytes)
                 await MainActor.run {
                     self.installStreamingSource(source, url: url, budgetBytes: budgetBytes)
