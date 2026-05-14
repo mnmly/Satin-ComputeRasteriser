@@ -70,6 +70,10 @@ mirrored in SwiftPDAL's `ChunkPacker` so streamed chunks are upload-ready.
 - ``CRDispatchArgs``
 - ``ComputeRasteriserLayout``
 
+### Guides
+
+- <doc:StreamingCOPCClouds>
+
 ### Reference
 
 - <doc:CrossPackageLayout>
