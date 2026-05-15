@@ -389,8 +389,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/mnmly/SwiftPDAL";
 			requirement = {
-				kind = exactVersion;
-				version = 1.3.0;
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.4.1;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

@@ -23,7 +23,6 @@ import simd
 public final class StreamingAdapter {
     private let source: any StreamingPointCloudSource
     private let cloud: ComputeRasteriserPointCloud
-    private let pixelScale: Float
     private var slotsByChunk: [ChunkID: [Int]] = [:]
 
     public private(set) var residentChunks: Int = 0
@@ -32,12 +31,10 @@ public final class StreamingAdapter {
 
     public init(
         source: any StreamingPointCloudSource,
-        cloud: ComputeRasteriserPointCloud,
-        pixelScale: Float = 800
+        cloud: ComputeRasteriserPointCloud
     ) {
         self.source = source
         self.cloud = cloud
-        self.pixelScale = pixelScale
     }
 
     public func setBudget(bytes: Int) { source.setBudget(bytes) }
@@ -46,7 +43,15 @@ public final class StreamingAdapter {
     /// delta the driver published since the last call. Cheap when nothing
     /// changed (one MTLBlit's worth of work at most).
     public func update(camera: Camera, viewport: SIMD2<Float>) {
-        let scale = max(pixelScale, max(viewport.x, viewport.y) * 0.5)
+        // FOV-aware pixelScale derived from the camera's projection matrix
+        // — see ``ComputeRasteriserProjection/screenSpacePixelScale(viewportHeight:projectionMatrix:)``.
+        // The previous `viewport.y * 0.5` was FOV-blind: a 90° camera and a
+        // 10° camera got the same value, so the SwiftPDAL scorer made the
+        // same residency decision regardless of zoom.
+        let scale = ComputeRasteriserProjection.screenSpacePixelScale(
+            viewportHeight: viewport.y,
+            projectionMatrix: camera.projectionMatrix
+        )
         let view = StreamingCameraView(
             position: camera.worldPosition,
             viewProjection: camera.projectionMatrix * camera.viewMatrix,

@@ -263,7 +263,7 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         pointCloud = cloud
         rasteriser.addPointCloud(cloud)
 
-        let adapter = StreamingAdapter(source: source, cloud: cloud, pixelScale: currentViewport.y * 0.5)
+        let adapter = StreamingAdapter(source: source, cloud: cloud)
         streamingAdapter = adapter
 
         let shiftedMin = source.info.bounds.min - originShiftF
