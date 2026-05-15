@@ -137,20 +137,10 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// LIFO of free slot indices. Newest-freed wins so cache lines stay warm.
     private var freeSlots: [Int]
 
-    /// `BindableBuffer` view onto the most recently written ``filesBuffer``
-    /// slot. Pass this (not `filesBuffer` directly) to compute processors so
-    /// Satin's bind path reads from the correct ring offset. Sequential
-    /// `updateFiles` calls within one command buffer advance the slot, so
-    /// each encode's bound view points at its own per-camera transforms.
-    public var filesBindable: (any BindableBuffer)? {
-        guard let filesBuffer else { return nil }
-        return FilesSlotView(buffer: filesBuffer, offset: filesBufferOffset)
-    }
-
-    private struct FilesSlotView: BindableBuffer {
-        let buffer: MTLBuffer!
-        let offset: Int
-    }
+    // Processors read ``filesBuffer`` + ``filesBufferOffset`` directly and
+    // bind the offset via their own `applyAdditionalBindings`. Sequential
+    // `updateFiles` calls within one command buffer advance the slot, so each
+    // encode's binding points at its own per-camera transforms.
 
     /// Streaming-mode init. Pre-allocates an empty slot pool; the caller
     /// drives residency via

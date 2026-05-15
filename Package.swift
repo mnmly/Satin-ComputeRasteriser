@@ -16,7 +16,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/mnmly/Satin", branch: "feature/2.0-shader-source-transforms"),
+        .package(url: "https://github.com/Fabric-Project/Satin", branch: "feature/2.0"),
         .package(url: "https://github.com/mnmly/SwiftPDAL", from: "1.5.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
     ],

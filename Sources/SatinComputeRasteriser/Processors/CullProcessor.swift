@@ -34,7 +34,18 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
     }
 
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
-    public var filesBuffer: (any BindableBuffer)? { didSet { set(filesBuffer, index: .Custom1) } }
+    public var filesBuffer: MTLBuffer? { didSet { set(filesBuffer, index: .Custom1) } }
+    /// Byte offset into ``filesBuffer`` for the current ring slot. Bound on
+    /// top of the standard `MTLBuffer` binding (which uses offset 0) via
+    /// ``applyAdditionalBindings(_:)``.
+    public var filesBufferOffset: Int = 0
+
+    open override func applyAdditionalBindings(_ computeEncoder: MTLComputeCommandEncoder) {
+        if let filesBuffer {
+            computeEncoder.setBuffer(filesBuffer, offset: filesBufferOffset, index: ComputeBufferIndex.Custom1.rawValue)
+        }
+    }
+
     public var visibleBuffer: MTLBuffer? { didSet { set(visibleBuffer, index: .Custom2) } }
     public var counterBuffer: MTLBuffer? { didSet { set(counterBuffer, index: .Custom3) } }
 

@@ -43,7 +43,17 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
     public var xyzLowBuffer: MTLBuffer? { didSet { set(xyzLowBuffer, index: .Custom1) } }
     public var xyzMedBuffer: MTLBuffer? { didSet { set(xyzMedBuffer, index: .Custom2) } }
     public var xyzHighBuffer: MTLBuffer? { didSet { set(xyzHighBuffer, index: .Custom3) } }
-    public var filesBuffer: (any BindableBuffer)? { didSet { set(filesBuffer, index: .Custom4) } }
+    public var filesBuffer: MTLBuffer? { didSet { set(filesBuffer, index: .Custom4) } }
+    /// Byte offset into ``filesBuffer`` for the current ring slot. Bound on
+    /// top of the standard `MTLBuffer` binding (which uses offset 0) via
+    /// ``applyAdditionalBindings(_:)``.
+    public var filesBufferOffset: Int = 0
+
+    open override func applyAdditionalBindings(_ computeEncoder: MTLComputeCommandEncoder) {
+        if let filesBuffer {
+            computeEncoder.setBuffer(filesBuffer, offset: filesBufferOffset, index: ComputeBufferIndex.Custom4.rawValue)
+        }
+    }
     public var pixelBuffer: MTLBuffer? { didSet { set(pixelBuffer, index: .Custom5) } }
     public var levelsBuffer: MTLBuffer? { didSet { set(levelsBuffer, index: .Custom6) } }
     public var visibleBatchesBuffer: MTLBuffer? { didSet { set(visibleBatchesBuffer, index: .Custom7) } }
