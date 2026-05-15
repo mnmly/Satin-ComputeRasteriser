@@ -31,8 +31,8 @@ For datasets larger than VRAM, the cloud is driven from an external
 streaming source (e.g. SwiftPDAL's `CopcStreamingPointCloudSource`).
 Construct the cloud with ``ComputeRasteriserPointCloud/init(context:capacity:files:originShift:label:)``
 to allocate a fixed slot pool, then page chunks in/out via
-``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
-and ``ComputeRasteriserPointCloud/removeBatches(slots:)`` as the camera
+``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``
+and ``ComputeRasteriserPointCloud/removeBatches(slots:commit:)`` as the camera
 moves. Non-resident slots short-circuit in the cull kernel via
 ``RasterBatch/state`` — a `state == 0` batch is skipped before frustum
 testing.
@@ -69,6 +69,12 @@ mirrored in SwiftPDAL's `ChunkPacker` so streamed chunks are upload-ready.
 - ``VisibleBatch``
 - ``CRDispatchArgs``
 - ``ComputeRasteriserLayout``
+
+### Streaming companion
+
+The `SatinComputeRasteriserStreaming` library product (separate target
+in this package) provides `StreamingAdapter`, the SwiftPDAL glue. Link it
+only if you want to drive a cloud from a SwiftPDAL streaming source.
 
 ### Guides
 

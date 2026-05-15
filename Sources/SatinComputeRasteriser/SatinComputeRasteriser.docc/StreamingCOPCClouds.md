@@ -7,8 +7,8 @@ stays under VRAM regardless of file size.
 
 The renderer's slot pool was designed to be paged — chunks load and
 evict as the camera moves. The renderer doesn't own the loader; it
-exposes ``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
-and ``ComputeRasteriserPointCloud/removeBatches(slots:)`` for an
+exposes ``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``
+and ``ComputeRasteriserPointCloud/removeBatches(slots:commit:)`` for an
 external streaming source to call.
 
 The reference implementation is
@@ -145,12 +145,12 @@ grow at runtime today.
 
 ## Pitfalls
 
-- **Don't** call ``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
+- **Don't** call ``ComputeRasteriserPointCloud/addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``
   with more batches than ``ComputeRasteriserPointCloud/freeSlotCount``.
   The precondition will trap. Either evict first or skip and let the
   source retry next tick.
 - **Always** preserve the `[ChunkID: [Int]]` map. Without it,
-  ``ComputeRasteriserPointCloud/removeBatches(slots:)`` won't know
+  ``ComputeRasteriserPointCloud/removeBatches(slots:commit:)`` won't know
   which slots a given evicted chunk owned.
 - **Apply removes before adds** in each delta. New chunks may need
   slots that the removed chunks just freed.

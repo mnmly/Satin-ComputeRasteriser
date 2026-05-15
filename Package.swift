@@ -10,9 +10,14 @@ let package = Package(
             name: "SatinComputeRasteriser",
             targets: ["SatinComputeRasteriser"]
         ),
+        .library(
+            name: "SatinComputeRasteriserStreaming",
+            targets: ["SatinComputeRasteriserStreaming"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/mnmly/Satin", branch: "feature/2.0-shader-source-transforms"),
+        .package(url: "https://github.com/mnmly/SwiftPDAL", from: "1.5.0"),
         .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
     ],
     targets: [
@@ -23,6 +28,17 @@ let package = Package(
             ],
             resources: [
                 .copy("Pipelines"),
+            ]
+        ),
+        .target(
+            name: "SatinComputeRasteriserStreaming",
+            dependencies: [
+                "SatinComputeRasteriser",
+                .product(name: "Satin", package: "Satin"),
+                .product(name: "SwiftPDAL", package: "SwiftPDAL"),
+            ],
+            swiftSettings: [
+                .interoperabilityMode(.Cxx),
             ]
         ),
         .testTarget(

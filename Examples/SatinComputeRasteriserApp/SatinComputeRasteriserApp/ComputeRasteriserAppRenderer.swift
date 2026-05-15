@@ -5,6 +5,7 @@ import SatinComputeRasteriser
 import simd
 #if canImport(SwiftPDAL)
 import SwiftPDAL
+import SatinComputeRasteriserStreaming
 #endif
 
 /// Mirror of SwiftPDAL.ResidencyPolicy that doesn't require importing

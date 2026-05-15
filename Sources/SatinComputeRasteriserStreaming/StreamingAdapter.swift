@@ -1,34 +1,36 @@
-// Glue between SwiftPDAL's CopcStreamingPointCloudSource and the
-// renderer's slot pool. Lives in the example app per the streaming
-// design (the renderer package never depends on PDAL/LASzip).
-//
-// Per-frame loop:
-//   1. submit camera view to source
-//   2. drain pollLatest() — a (added, removed) delta
-//   3. removeBatches(slots:) for evictions, addBatches(...) for adds
-//   4. record ChunkID → [slot] so future evictions know which slots to free
-//
-// SwiftPDAL is wrapped in `#if canImport(SwiftPDAL)` so the example app
-// keeps building without it. To wire it up:
-//   File → Add Package Dependencies… → Add Local… → ../../../../../Personal/SwiftPDAL
-//   then add the SwiftPDAL product to this target.
-
-#if canImport(SwiftPDAL)
 import Foundation
 import Satin
 import SatinComputeRasteriser
 import SwiftPDAL
 import simd
 
+/// Bridges a SwiftPDAL `StreamingPointCloudSource` to a
+/// `ComputeRasteriserPointCloud` slot pool.
+///
+/// The renderer package stays free of PDAL/lazperf; this adapter is the
+/// glue layer where the streaming driver and the GPU residency pool meet.
+/// Per frame: submit the camera view, drain the driver's `(added, removed)`
+/// delta, free evicted slots, upload new chunks, and commit once at the end
+/// of the tick so a residency churn costs one buffer flush rather than one
+/// per chunk.
 public final class StreamingAdapter {
     private let source: any StreamingPointCloudSource
     private let cloud: ComputeRasteriserPointCloud
     private var slotsByChunk: [ChunkID: [Int]] = [:]
 
+    /// Number of chunks currently resident in the slot pool.
     public private(set) var residentChunks: Int = 0
+    /// Sum of points across resident chunks (mirrors `cloud.pointCount`).
     public private(set) var residentPoints: Int = 0
+    /// Last non-fatal error surfaced during ``update(camera:viewport:)`` —
+    /// typically a "slot pool full" notice when the resident budget is
+    /// undersized for what the scorer wants to bring in.
     public private(set) var lastError: String?
 
+    /// Creates an adapter that owns no resources of its own — it merely
+    /// routes data between `source` and `cloud`.
+    /// - Parameter source: Streaming driver producing chunked point batches.
+    /// - Parameter cloud: Destination renderer holding the GPU slot pool.
     public init(
         source: any StreamingPointCloudSource,
         cloud: ComputeRasteriserPointCloud
@@ -37,11 +39,15 @@ public final class StreamingAdapter {
         self.cloud = cloud
     }
 
+    /// Forwards a byte budget hint to the underlying source.
     public func setBudget(bytes: Int) { source.setBudget(bytes) }
 
     /// Per-frame tick. Submits the latest camera view and applies whatever
     /// delta the driver published since the last call. Cheap when nothing
     /// changed (one MTLBlit's worth of work at most).
+    /// - Parameter camera: Active scene camera; world position and matrices
+    ///   are read to score chunk residency.
+    /// - Parameter viewport: Render target size in pixels.
     public func update(camera: Camera, viewport: SIMD2<Float>) {
         // FOV-aware pixelScale derived from the camera's projection matrix
         // — see ``ComputeRasteriserProjection/screenSpacePixelScale(viewportHeight:projectionMatrix:)``.
@@ -102,6 +108,7 @@ public final class StreamingAdapter {
         residentPoints = cloud.pointCount
     }
 
+    /// Closes the underlying source. Idempotent on the source side.
     public func close() { source.close() }
 
     private static func toRasterBatch(_ s: StreamingRasterBatch) -> RasterBatch {
@@ -116,4 +123,3 @@ public final class StreamingAdapter {
         return b
     }
 }
-#endif

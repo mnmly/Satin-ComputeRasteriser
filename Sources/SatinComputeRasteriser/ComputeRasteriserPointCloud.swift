@@ -49,8 +49,8 @@ public struct ComputeRasteriserCapacity: Hashable, Sendable {
 ///   ``replacePackedPointCloud(_:)`` — sizes the pool to fit and uploads
 ///   in one shot. Backwards-compatible with pre-streaming code.
 /// * **Incremental**, via ``init(context:capacity:files:originShift:label:)``
-///   followed by ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
-///   and ``removeBatches(slots:)`` — designed for an external streaming
+///   followed by ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``
+///   and ``removeBatches(slots:commit:)`` — designed for an external streaming
 ///   source (e.g. SwiftPDAL) that pages chunks in and out as the camera moves.
 ///
 /// In both modes the cull kernel iterates every slot and short-circuits
@@ -129,8 +129,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     private var filesSlotStride: Int = 0
 
     /// CPU-side mirror of every slot's ``RasterBatch``. Mutated by
-    /// ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
-    /// and ``removeBatches(slots:)``, then memcpy'd into ``batchesBuffer``
+    /// ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``
+    /// and ``removeBatches(slots:commit:)``, then memcpy'd into ``batchesBuffer``
     /// in one shot. Empty slots have `state == 0` and do not contribute to
     /// ``pointCount`` / ``residentBatchCount``.
     private var batchMirror: [RasterBatch]
@@ -154,8 +154,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
 
     /// Streaming-mode init. Pre-allocates an empty slot pool; the caller
     /// drives residency via
-    /// ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:)``
-    /// and ``removeBatches(slots:)``.
+    /// ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``
+    /// and ``removeBatches(slots:commit:)``.
     ///
     /// - Parameters:
     ///   - context: Satin context (provides the Metal device).
@@ -271,9 +271,9 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     ///     are preserved.
     /// - Returns: slot index (in `[0, capacity.maxResidentBatches)`) chosen
     ///   for each input batch. Map this back to your chunk identity so a later
-    ///   ``removeBatches(slots:)`` call can free the right slots.
+    ///   ``removeBatches(slots:commit:)`` call can free the right slots.
     /// - Precondition: `freeSlotCount >= batches.count`. Call
-    ///   ``removeBatches(slots:)`` first if you'd otherwise overflow.
+    ///   ``removeBatches(slots:commit:)`` first if you'd otherwise overflow.
     /// - Parameter commit: if `true` (default), the GPU-visible
     ///   ``batchesBuffer`` is re-uploaded before this call returns. Pass
     ///   `false` when making many sequential calls (e.g. draining a
@@ -329,7 +329,9 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// Free the given slots. Their ``RasterBatch/state`` flips to `0` so the
     /// cull kernel skips them next frame; the slots return to the free list
     /// and may be reused by a subsequent `addBatches`.
-    /// - Parameter commit: see ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``.
+    /// - Parameters:
+    ///   - slots: Indices previously returned by `addBatches`.
+    ///   - commit: see ``addBatches(positionsXYZLow:positionsXYZMed:positionsXYZHigh:colors:levels:batches:commit:)``.
     public func removeBatches(slots: [Int], commit: Bool = true) {
         guard !slots.isEmpty else { return }
         for slot in slots {

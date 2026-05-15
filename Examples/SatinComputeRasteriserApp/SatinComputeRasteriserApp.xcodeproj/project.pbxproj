@@ -7,10 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		991264CA2FB66479003B2067 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 991264C92FB66479003B2067 /* SatinComputeRasteriser */; };
-		9912654F2FB6668D003B2067 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 9912654E2FB6668D003B2067 /* SatinComputeRasteriser */; };
-		99A1D91F2FB30FC200CA3897 /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */; };
-		AABCDEF000000000000001A1 /* SwiftPDAL in Frameworks */ = {isa = PBXBuildFile; productRef = AABCDEF000000000000001C3 /* SwiftPDAL */; };
+		99ABF9322FB710A1003CF70A /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 99ABF9312FB710A1003CF70A /* SatinComputeRasteriser */; };
+		99ABF9342FB710A1003CF70A /* SatinComputeRasteriserStreaming in Frameworks */ = {isa = PBXBuildFile; productRef = 99ABF9332FB710A1003CF70A /* SatinComputeRasteriserStreaming */; };
+		99ABF9632FB711B5003CF70A /* SatinComputeRasteriser in Frameworks */ = {isa = PBXBuildFile; productRef = 99ABF9622FB711B5003CF70A /* SatinComputeRasteriser */; };
+		99ABF9652FB711B5003CF70A /* SatinComputeRasteriserStreaming in Frameworks */ = {isa = PBXBuildFile; productRef = 99ABF9642FB711B5003CF70A /* SatinComputeRasteriserStreaming */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,10 +30,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				991264CA2FB66479003B2067 /* SatinComputeRasteriser in Frameworks */,
-				99A1D91F2FB30FC200CA3897 /* SatinComputeRasteriser in Frameworks */,
-				9912654F2FB6668D003B2067 /* SatinComputeRasteriser in Frameworks */,
-				AABCDEF000000000000001A1 /* SwiftPDAL in Frameworks */,
+				99ABF9322FB710A1003CF70A /* SatinComputeRasteriser in Frameworks */,
+				99ABF9652FB711B5003CF70A /* SatinComputeRasteriserStreaming in Frameworks */,
+				99ABF9342FB710A1003CF70A /* SatinComputeRasteriserStreaming in Frameworks */,
+				99ABF9632FB711B5003CF70A /* SatinComputeRasteriser in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -76,10 +76,10 @@
 			);
 			name = SatinComputeRasteriserApp;
 			packageProductDependencies = (
-				99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */,
-				991264C92FB66479003B2067 /* SatinComputeRasteriser */,
-				AABCDEF000000000000001C3 /* SwiftPDAL */,
-				9912654E2FB6668D003B2067 /* SatinComputeRasteriser */,
+				99ABF9312FB710A1003CF70A /* SatinComputeRasteriser */,
+				99ABF9332FB710A1003CF70A /* SatinComputeRasteriserStreaming */,
+				99ABF9622FB711B5003CF70A /* SatinComputeRasteriser */,
+				99ABF9642FB711B5003CF70A /* SatinComputeRasteriserStreaming */,
 			);
 			productName = SatinComputeRasteriserApp;
 			productReference = 99A1D90F2FB30FA700CA3897 /* SatinComputeRasteriserApp.app */;
@@ -110,8 +110,7 @@
 			mainGroup = 99A1D9062FB30FA700CA3897;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */,
-				9912654D2FB6668D003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */,
+				99ABF9612FB711B5003CF70A /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 99A1D9102FB30FA700CA3897 /* Products */;
@@ -378,40 +377,28 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		9912654D2FB6668D003B2067 /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */ = {
+		99ABF9612FB711B5003CF70A /* XCLocalSwiftPackageReference "../../../Satin-ComputeRasteriser" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "../../../Satin-ComputeRasteriser";
 		};
 /* End XCLocalSwiftPackageReference section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/mnmly/SwiftPDAL";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.5.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
 /* Begin XCSwiftPackageProductDependency section */
-		991264C92FB66479003B2067 /* SatinComputeRasteriser */ = {
+		99ABF9312FB710A1003CF70A /* SatinComputeRasteriser */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SatinComputeRasteriser;
 		};
-		9912654E2FB6668D003B2067 /* SatinComputeRasteriser */ = {
+		99ABF9332FB710A1003CF70A /* SatinComputeRasteriserStreaming */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SatinComputeRasteriserStreaming;
+		};
+		99ABF9622FB711B5003CF70A /* SatinComputeRasteriser */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SatinComputeRasteriser;
 		};
-		99A1D91E2FB30FC200CA3897 /* SatinComputeRasteriser */ = {
+		99ABF9642FB711B5003CF70A /* SatinComputeRasteriserStreaming */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = SatinComputeRasteriser;
-		};
-		AABCDEF000000000000001C3 /* SwiftPDAL */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AABCDEF000000000000001B2 /* XCRemoteSwiftPackageReference "SwiftPDAL" */;
-			productName = SwiftPDAL;
+			productName = SatinComputeRasteriserStreaming;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
