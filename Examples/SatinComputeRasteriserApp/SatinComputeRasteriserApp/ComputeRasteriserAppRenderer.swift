@@ -7,6 +7,17 @@ import simd
 import SwiftPDAL
 #endif
 
+/// Mirror of SwiftPDAL.ResidencyPolicy that doesn't require importing
+/// SwiftPDAL into the AppState (which must compile without the dep).
+public enum StreamingResidencyChoice: String, CaseIterable, Hashable {
+    /// SwiftPDAL's `frustumFirstThenHalo` — frustum-visible chunks first,
+    /// then surround the camera with leftover budget.
+    case halo
+    /// SwiftPDAL's `distanceOnly` — no frustum gate, fill nearest-first.
+    /// Matches the "load it all" feel of non-streaming renderers.
+    case distance
+}
+
 public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var status: String = "Fixture"
     @Published public var errorMessage: String?
@@ -29,6 +40,7 @@ public final class ComputeRasteriserAppState: ObservableObject {
     /// residency decider to cap working-set bytes.
     @Published public var streamingBudgetMB: Int = 1024
     @Published public var isStreaming: Bool = false
+    @Published public var streamingResidency: StreamingResidencyChoice = .halo
 
     public init() {}
 }
@@ -46,6 +58,7 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
 
     #if canImport(SwiftPDAL)
     private var streamingAdapter: StreamingAdapter?
+    private var lastCOPCURL: URL?
     #endif
     public lazy var camera = PerspectiveCamera(
         context: defaultContext,
@@ -171,14 +184,19 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
                 // decodeConcurrency = active core count; LAZ decompress is
                 // single-threaded per chunk so going past cores doesn't help.
                 let cores = max(2, ProcessInfo.processInfo.activeProcessorCount)
+                let policy: SwiftPDAL.ResidencyPolicy =
+                    (await MainActor.run { self.appState.streamingResidency }) == .distance
+                    ? .distanceOnly : .frustumFirstThenHalo
                 let opts = StreamingOptions(
                     maxInFlightLoads: cores * 2,
                     decodeConcurrency: cores,
-                    driverTickInterval: .milliseconds(16)
+                    driverTickInterval: .milliseconds(16),
+                    residencyPolicy: policy
                 )
                 let source = try await SwiftPDAL.CopcStreamingPointCloudSource.open(url, options: opts)
                 source.setBudget(budgetBytes)
                 await MainActor.run {
+                    self.lastCOPCURL = url
                     self.installStreamingSource(source, url: url, budgetBytes: budgetBytes)
                 }
             } catch {
@@ -193,6 +211,16 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         let bytes = max(64, MB) * 1024 * 1024
         DispatchQueue.main.async { [appState] in appState.streamingBudgetMB = MB }
         streamingAdapter?.setBudget(bytes: bytes)
+    }
+
+    /// Switching residency policy requires re-opening the source — the
+    /// driver reads the policy at construction. Re-opens the same URL with
+    /// the new choice; ~100 ms hiccup while the hierarchy is rescanned.
+    public func setResidency(_ choice: StreamingResidencyChoice) {
+        DispatchQueue.main.async { [appState] in appState.streamingResidency = choice }
+        if let url = lastCOPCURL {
+            loadCOPC(url: url)
+        }
     }
 
     @MainActor

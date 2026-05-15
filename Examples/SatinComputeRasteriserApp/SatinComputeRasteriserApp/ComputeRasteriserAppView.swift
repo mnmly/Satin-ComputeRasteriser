@@ -121,6 +121,15 @@ public struct ComputeRasteriserAppView: View {
                         .frame(width: 150)
                         Text("\(appState.streamingBudgetMB) MB budget")
                             .font(.caption)
+                        Picker("Policy", selection: Binding(
+                            get: { appState.streamingResidency },
+                            set: { renderer.setResidency($0) }
+                        )) {
+                            Text("Halo").tag(StreamingResidencyChoice.halo)
+                            Text("Distance").tag(StreamingResidencyChoice.distance)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 160)
                     }
                 }
                 #endif
