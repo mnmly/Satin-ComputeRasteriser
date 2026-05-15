@@ -61,6 +61,10 @@ mirrored in SwiftPDAL's `ChunkPacker` so streamed chunks are upload-ready.
 - ``PackedPointCloudFixtures``
 - ``PLYPointCloudLoader``
 
+### Per-point displacement
+
+- ``DisplacementPass``
+
 ### GPU data layout (mirrored to Metal)
 
 - ``RasterBatch``
