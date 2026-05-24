@@ -39,9 +39,13 @@ Not implemented yet:
 
 ## Requirements
 
-- macOS 15 or newer
+- macOS 15 or newer, or iOS 17 or newer
 - Xcode with Metal tooling
 - Swift 6 package toolchain
+
+Both `SatinComputeRasteriser` and `SatinComputeRasteriserStreaming` build for
+macOS and iOS (device + simulator). The streaming target's COPC/PDAL slices
+ship via [SwiftPDAL 1.7.1+](https://github.com/mnmly/SwiftPDAL/releases/tag/1.7.1).
 
 The package depends on Satin:
 
