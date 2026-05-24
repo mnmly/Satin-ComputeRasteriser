@@ -15,9 +15,13 @@ struct SatinComputeRasteriserApp: App {
     var body: some Scene {
         WindowGroup("Satin Compute Rasteriser") {
             ComputeRasteriserAppView(renderer: renderer)
+                #if os(macOS)
                 .frame(minWidth: 640, minHeight: 640)
+                #endif
         }
+        #if os(macOS)
         .windowResizability(.contentSize)
+        #endif
     }
 
     private static func plyURL(from arguments: [String]) -> URL? {
