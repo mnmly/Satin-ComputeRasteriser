@@ -46,8 +46,8 @@ public final class ComputeRasteriserAppState: ObservableObject {
     public init() {}
 }
 
-open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable {
-    public lazy var renderer = Renderer(context: defaultContext)
+open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
+    public lazy var renderer = RenderEncoder(context: defaultContext)
     public lazy var rasteriser = ComputeRasteriser(context: defaultContext)
     public private(set) lazy var pointCloud = ComputeRasteriserPointCloud(
         context: defaultContext,
@@ -80,7 +80,14 @@ open class ComputeRasteriserAppRenderer: MetalViewRenderer, @unchecked Sendable 
         self.initialPLYURL = initialPLYURL
         self.appState = appState
         self.appState.mode = initialMode
-        super.init()
+        let device = MTLCreateSystemDefaultDevice()!
+        let context = Context(
+            device: device,
+            sampleCount: 1,
+            colorPixelFormat: .bgra8Unorm,
+            depthPixelFormat: .depth32Float
+        )
+        super.init(context: context)
     }
 
     open override func setup() {

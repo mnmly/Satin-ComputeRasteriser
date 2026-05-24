@@ -63,14 +63,14 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         return material
     }()
 
-    // colorLoadAction defaults to `.clear` on PostProcessor, which would wipe
-    // the entire render-pass color attachment on every composite call. That
-    // breaks stereo offline rendering (the right-eye composite clears the
+    // colorLoadAction defaults to `.clear` on PostProcessEncoder, which would
+    // wipe the entire render-pass color attachment on every composite call.
+    // That breaks stereo offline rendering (the right-eye composite clears the
     // left-eye composite) and means the rasteriser unconditionally replaces
     // any scene content below. `.load` makes it a true overlay: prior scene
     // pixels are preserved, and the postMaterial's `blending = .alpha` does
     // the actual composite.
-    private lazy var postProcessor = PostProcessor(
+    private lazy var postProcessor = PostProcessEncoder(
         label: "ComputeRasteriserPostProcessor",
         context: context,
         material: postMaterial,
@@ -285,7 +285,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
 
     /// Variant that composites onto a specific sub-region of the render target,
     /// e.g. one eye's half viewport for stereo offline rendering. Forwards to
-    /// Satin's `PostProcessor.draw(viewports:)` which respects the supplied
+    /// Satin's `PostProcessEncoder.draw(viewports:)` which respects the supplied
     /// viewport instead of the post-processor's internal renderer viewport.
     public func draw(
         renderPassDescriptor: MTLRenderPassDescriptor,
