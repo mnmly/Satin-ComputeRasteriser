@@ -13,6 +13,7 @@ struct ColorPassUniforms {
     float pointSizeScale;
     int lodDither;
     int applyDisplacement;
+    int applyTint;
 };
 
 kernel void colorPassUpdate(
@@ -27,6 +28,7 @@ kernel void colorPassUpdate(
     device const VisibleBatch *visible [[buffer(ComputeBufferCustom7)]],
     device const float3 *displacements [[buffer(ComputeBufferCustom8)]],
     device const uint *colors [[buffer(ComputeBufferCustom9)]],
+    device const float4 *tints [[buffer(ComputeBufferCustom10)]],
     uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
@@ -77,9 +79,19 @@ kernel void colorPassUpdate(
             color = 0x00010101u;
         }
 
-        const uint r = color & 0xffu;
-        const uint g = (color >> 8) & 0xffu;
-        const uint b = (color >> 16) & 0xffu;
+        uint r = color & 0xffu;
+        uint g = (color >> 8) & 0xffu;
+        uint b = (color >> 16) & 0xffu;
+
+        if (uniforms.applyTint != 0) {
+            const float4 tint = tints[pointIndex];
+            const float w = saturate(tint.a);
+            const float3 orig = float3(float(r), float(g), float(b)) * (1.0 / 255.0);
+            const float3 mixed = mix(orig, saturate(tint.rgb), w);
+            r = uint(saturate(mixed.x) * 255.0 + 0.5);
+            g = uint(saturate(mixed.y) * 255.0 + 0.5);
+            b = uint(saturate(mixed.z) * 255.0 + 0.5);
+        }
         const int radius = pointFootprintRadius(
             point, file,
             uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,

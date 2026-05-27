@@ -17,11 +17,21 @@ open class ColorPassProcessor: DepthPassProcessor {
 
     public var colorsBuffer: MTLBuffer? { didSet { set(colorsBuffer, index: .Custom9) } }
 
+    /// Per-point `float4` color tint, indexed by pack-order `pointIndex`.
+    /// Must be set (to either a real buffer or `xyzLowBuffer` as a stand-in)
+    /// for Metal validation even when `applyTint` is false.
+    public var tintBuffer: MTLBuffer? { didSet { set(tintBuffer, index: .Custom10) } }
+
+    public var applyTint: Bool = false {
+        didSet { set("applyTint", applyTint ? 1 : 0) }
+    }
+
     open override func setup() {
         super.setup()
         set("depthTolerance", depthTolerance)
         set("colorizeChunks", colorizeChunks ? 1 : 0)
         set("colorizeOverdraw", colorizeOverdraw ? 1 : 0)
+        set("applyTint", applyTint ? 1 : 0)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
@@ -35,6 +45,7 @@ open class ColorPassProcessor: DepthPassProcessor {
                 && levelsBuffer != nil
                 && visibleBatchesBuffer != nil
                 && displacementBuffer != nil
+                && tintBuffer != nil
                 && indirectArgsBuffer != nil
         )
     }

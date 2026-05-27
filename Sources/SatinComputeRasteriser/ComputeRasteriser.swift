@@ -146,6 +146,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
 
         depthProcessor.applyDisplacement = configuration.applyDisplacement
         colorProcessor.applyDisplacement = configuration.applyDisplacement
+        colorProcessor.applyTint = configuration.applyTint
 
         colorProcessor.depthTolerance = configuration.depthTolerance
         colorProcessor.colorizeChunks = configuration.colorizeChunks
@@ -212,6 +213,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
 
             bind(cloud, to: colorProcessor, pixelBuffer: pixelBuffer)
             bindDisplacement(cloud, to: colorProcessor)
+            bindTint(cloud, to: colorProcessor)
             colorProcessor.colorsBuffer = cloud.colorsBuffer
             colorProcessor.update(commandBuffer)
         }
@@ -322,6 +324,13 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     /// real displacement buffer; the shader gates reads on `applyDisplacement`.
     private func bindDisplacement(_ cloud: ComputeRasteriserPointCloud, to processor: DepthPassProcessor) {
         processor.displacementBuffer = cloud.displacementBuffer ?? cloud.xyzLowBuffer
+    }
+
+    /// ColorPass reads tint at Custom10. Custom10 must always be bound for
+    /// Metal validation — fall back to `xyzLowBuffer` when the user hasn't
+    /// supplied a real tint buffer; the shader gates reads on `applyTint`.
+    private func bindTint(_ cloud: ComputeRasteriserPointCloud, to processor: ColorPassProcessor) {
+        processor.tintBuffer = cloud.tintBuffer ?? cloud.xyzLowBuffer
     }
 
     private func resizeResources() {

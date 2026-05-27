@@ -93,6 +93,15 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// `ComputeRasteriserConfiguration.applyDisplacement == true`.
     public var displacementBuffer: MTLBuffer?
 
+    /// Optional per-point color tint (one `float4` per slot-pool point,
+    /// stride 16 bytes). Bound at `Custom10` on the color pass when
+    /// `ComputeRasteriserConfiguration.applyTint == true`. The color pass
+    /// composes each point's stored RGB with `tint.rgb` weighted by
+    /// `tint.a`: `final = mix(original, tint.rgb, tint.a)`. So `tint.a==0`
+    /// is a pass-through, `tint.a==1` is a full replacement, and partial
+    /// alphas modulate.
+    public var tintBuffer: MTLBuffer?
+
     /// Allocate a `capacity.maxResidentPoints * stride(float3)` buffer
     /// suitable for use as ``displacementBuffer``. Sized by pool capacity
     /// (not current resident count) so the buffer is allocated once and
@@ -105,6 +114,19 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         let length = capacity.maxResidentPoints * MemoryLayout<SIMD3<Float>>.stride
         let buffer = context.device.makeBuffer(length: length, options: storage == .private ? .storageModePrivate : .storageModeShared)
         buffer?.label = label ?? "\(self.label).Displacement"
+        return buffer
+    }
+
+    /// Allocate a `capacity.maxResidentPoints * stride(float4)` buffer
+    /// suitable for use as ``tintBuffer``. Same sizing semantics as
+    /// ``makeDisplacementBuffer(storage:label:)``.
+    public func makeTintBuffer(
+        storage: MTLStorageMode = .private,
+        label: String? = nil
+    ) -> MTLBuffer? {
+        let length = capacity.maxResidentPoints * MemoryLayout<SIMD4<Float>>.stride
+        let buffer = context.device.makeBuffer(length: length, options: storage == .private ? .storageModePrivate : .storageModeShared)
+        buffer?.label = label ?? "\(self.label).Tint"
         return buffer
     }
 

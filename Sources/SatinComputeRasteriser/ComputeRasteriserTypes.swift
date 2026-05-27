@@ -44,6 +44,12 @@ public struct ComputeRasteriserConfiguration: Sendable {
     /// Only honored in `.highQualityAverage` mode for now.
     public var applyDisplacement: Bool
 
+    /// If true, the color pass mixes per-point `tintBuffer[i].rgb` into the
+    /// stored color weighted by `tintBuffer[i].a`. `tint.a==0` is a no-op,
+    /// `tint.a==1` is a full color replacement. Only honored in
+    /// `.highQualityAverage` mode for now.
+    public var applyTint: Bool
+
     public init(
         mode: ComputeRasteriserMode = .highQualityAverage,
         depthTolerance: Float = 0.01,
@@ -59,7 +65,8 @@ public struct ComputeRasteriserConfiguration: Sendable {
         minimumPointSize: Float = 1.0,
         maximumPointSize: Float = 1.0,
         pointSizeScale: Float = 1.0,
-        applyDisplacement: Bool = false
+        applyDisplacement: Bool = false,
+        applyTint: Bool = false
     ) {
         self.mode = mode
         self.depthTolerance = depthTolerance
@@ -76,6 +83,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.maximumPointSize = maximumPointSize
         self.pointSizeScale = pointSizeScale
         self.applyDisplacement = applyDisplacement
+        self.applyTint = applyTint
     }
 }
 
