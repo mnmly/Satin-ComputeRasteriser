@@ -12,7 +12,8 @@ Debug builds are dominated by retain/release noise that doesn't exist in
 Release and will mislead profiling).
 
 Streaming depends on a patched `lazperf` shipped in
-`copclib-1.2.0.xcframework` (see [`SwiftPDAL` 1.5.0+](https://github.com/mnmly/SwiftPDAL/releases/tag/1.5.0)).
+`copclib-1.2.0.xcframework` (the package pins
+[`SwiftPDAL` 1.7.1+](https://github.com/mnmly/SwiftPDAL/releases/tag/1.7.1)).
 No app-side action required; the optimization sits behind the existing
 `CxxCOPC` C bridge.
 

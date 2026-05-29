@@ -39,8 +39,8 @@ The upstream project notes that some shader files adapt frustum-culling code fro
 
 ## Satin
 
-- Upstream: `https://github.com/mnmly/Satin`
-- Package dependency: branch `feature/2.0-shader-source-transforms`
+- Upstream: `https://github.com/Fabric-Project/Satin`
+- Package dependency: branch `feature/2.0`
 - License: MIT
 - Copyright: `Copyright (c) 2025 Hi-Rez`
 

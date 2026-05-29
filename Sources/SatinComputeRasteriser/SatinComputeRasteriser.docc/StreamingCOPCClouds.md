@@ -15,8 +15,9 @@ The reference implementation is
 [SwiftPDAL](https://github.com/mnmly/SwiftPDAL)'s
 `CopcStreamingPointCloudSource`, which reads
 [COPC](https://copc.io) (Cloud Optimized Point Cloud) files via
-copc-lib. The example app under `Examples/SatinComputeRasteriserApp/`
-ships a ~80-line `StreamingAdapter` that wires the two together.
+copc-lib. The `SatinComputeRasteriserStreaming` library target ships a
+small `StreamingAdapter` that wires the two together; the example app
+under `Examples/SatinComputeRasteriserApp/` drives it.
 
 ## End-to-end shape
 

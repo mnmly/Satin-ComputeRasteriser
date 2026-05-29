@@ -18,21 +18,27 @@ There is also a CUDA-inspired `.nearestPoint` mode that writes reverse-Z per-pix
 
 Implemented:
 
-- Swift package library target: `SatinComputeRasteriser`
+- Swift package library targets: `SatinComputeRasteriser` (core) and
+  `SatinComputeRasteriserStreaming` (SwiftPDAL/COPC glue)
 - Packed point-cloud data model
 - Deterministic fixture generation
 - PLY point-cloud loading for `x/y/z` plus optional `red/green/blue`
-- Clear, depth, color, and resolve Metal compute passes
+- GPU batch culling + indirect dispatch, clear, depth, color, resolve,
+  and optional hole-fill Metal compute passes
 - CUDA-inspired nearest-point Metal mode with portable 32-bit atomics
-- Distance-based point sizing for both HQS and nearest modes
+- Distance-based and world-space point sizing for both HQS and nearest modes
+- Continuous LOD (CLOD) with per-batch precision selection and dither
+- Out-of-core streaming from COPC files via a slot pool, paged by an
+  external source (SwiftPDAL's `CopcStreamingPointCloudSource`)
+- Per-point displacement (`DisplacementPass`) and per-point color tint
+  (`TintPass`)
 - Satin integration through `Object`, `ComputeProcessor`, and `PostProcessor`
-- macOS example app in `Examples/SatinComputeRasteriserApp`
+- macOS + iOS example app in `Examples/SatinComputeRasteriserApp`
 
 Not implemented yet:
 
-- LAS/LAZ loader parity with upstream `LasLoaderSparse`
 - Full CUDA path parity
-- Potree node LOD path
+- Potree node LOD path (use COPC instead)
 - VR paths
 - Bounding-box debug rendering
 - NVIDIA subgroup partitioning optimization
@@ -50,7 +56,7 @@ ship via [SwiftPDAL 1.7.1+](https://github.com/mnmly/SwiftPDAL/releases/tag/1.7.
 The package depends on Satin:
 
 ```swift
-.package(url: "https://github.com/mnmly/Satin", branch: "feature/2.0-shader-source-transforms")
+.package(url: "https://github.com/Fabric-Project/Satin", branch: "feature/2.0")
 ```
 
 ## Build and Test

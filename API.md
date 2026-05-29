@@ -1,6 +1,6 @@
 # API
 
-This package exposes a small API around packed point-cloud rendering. The public surface is intentionally narrow while the port is still early.
+This package exposes a focused API around packed point-cloud rendering. This document covers the core in-memory path. For the out-of-core streaming API (slot pools, `addBatches`/`removeBatches`, COPC via SwiftPDAL), see the DocC guide `StreamingCOPCClouds` and the `SatinComputeRasteriserStreaming` target.
 
 ## Main Types
 
@@ -202,15 +202,28 @@ public struct ComputeRasteriserConfiguration {
     public var depthTolerance: Float
     public var backgroundColor: SIMD4<Float>
     public var enableFrustumCulling: Bool
+    public var lodBias: Int
+    /// Continuous-LOD master switch. When `false`, every resident point is
+    /// drawn regardless of its precomputed level; `lodBias` and
+    /// `enableLODDither` are ignored.
+    public var enableCLOD: Bool
+    public var enableLODDither: Bool
+    /// Number of hole-fill iterations run after resolve. `0` disables it.
+    public var holeFillIterations: Int
     public var colorizeChunks: Bool
     public var colorizeOverdraw: Bool
+    public var pointSizeMode: PointSizeMode
     public var minimumPointSize: Float
     public var maximumPointSize: Float
     public var pointSizeScale: Float
     /// When true, the depth + color passes add a per-point `float3` from
     /// `cloud.displacementBuffer` (Custom8) after decoding the position.
-    /// See "Per-point displacement" above.
+    /// See "Per-point displacement" above. `.highQualityAverage` only.
     public var applyDisplacement: Bool
+    /// When true, the color pass mixes per-point `cloud.tintBuffer[i].rgb`
+    /// into the stored color, weighted by `tint.a` (`0` = no-op,
+    /// `1` = full replacement). `.highQualityAverage` only.
+    public var applyTint: Bool
 }
 ```
 
@@ -220,11 +233,18 @@ Defaults:
 - `depthTolerance = 0.01`
 - `backgroundColor = [0, 0, 0, 0]`
 - `enableFrustumCulling = true`
+- `lodBias = 0`
+- `enableCLOD = true`
+- `enableLODDither = true`
+- `holeFillIterations = 0`
 - `colorizeChunks = false`
 - `colorizeOverdraw = false`
+- `pointSizeMode = .screenSpace`
 - `minimumPointSize = 1`
 - `maximumPointSize = 1`
 - `pointSizeScale = 1`
+- `applyDisplacement = false`
+- `applyTint = false`
 
 Modes:
 
@@ -236,12 +256,16 @@ The first nearest-point implementation resolves one visible point cloud per fram
 Point size:
 
 ```swift
+rasteriser.configuration.pointSizeMode = .screenSpace
 rasteriser.configuration.minimumPointSize = 1
 rasteriser.configuration.maximumPointSize = 5
 rasteriser.configuration.pointSizeScale = 5
 ```
 
-The shader computes `pointSize = clamp(pointSizeScale / cameraDistance, minimumPointSize, maximumPointSize)`. A size of `1` writes a single pixel, so the defaults preserve the original one-pixel rasterization.
+`PointSizeMode` selects how `pointSizeScale` is interpreted:
+
+- `.screenSpace` (default): `pointSize = clamp(pointSizeScale / viewDistance, minimumPointSize, maximumPointSize)` pixels — `pointSizeScale` is "pixels at one unit of view distance"; FOV does not affect size. A scale that yields `1` writes a single pixel, so the defaults preserve the original one-pixel rasterization.
+- `.worldSpace`: `pointSizeScale` is a world-space sphere radius in scene units, projected to pixels; FOV and screen height affect the result.
 
 ## Loading PLY
 

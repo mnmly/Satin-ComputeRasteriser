@@ -1,5 +1,12 @@
 # Satin Compute Rasteriser Port Plan
 
+> **Historical document.** This captures the original port plan and a
+> point-in-time status snapshot; it is intentionally not kept in sync with
+> the shipped code. For the current build, the authoritative Satin/SwiftPDAL
+> dependencies are in `Package.swift` (now `Fabric-Project/Satin`, branch
+> `feature/2.0`), and the current public API is documented in `README.md`,
+> `API.md`, and the DocC site.
+
 ## Goal
 
 Port the most recent practical path from `/Users/mnmly/Development-local/GitHub/cpp/compute_rasterizer` into a Satin/Metal Swift package in this directory.
