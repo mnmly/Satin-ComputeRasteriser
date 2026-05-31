@@ -61,6 +61,15 @@ mirrored in SwiftPDAL's `ChunkPacker` so streamed chunks are upload-ready.
 - ``PackedPointCloudFixtures``
 - ``PLYPointCloudLoader``
 
+### GPU packing
+
+For callers whose point data already lives in GPU buffers (e.g. a
+GPU-evaluated geometry-node engine), ``GPUPacker`` reproduces
+``PackedPointCloudFixtures/pack(positions:colors:pointsPerBatch:lodLevels:coarseVoxelDivisions:)``
+entirely on the GPU — decode-identical output, ~70× faster on large clouds.
+
+- ``GPUPacker``
+
 ### Per-point overrides
 
 - ``DisplacementPass``

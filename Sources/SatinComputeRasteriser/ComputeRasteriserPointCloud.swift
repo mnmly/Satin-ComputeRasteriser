@@ -250,6 +250,59 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         }
     }
 
+    // MARK: - GPU wholesale pack support
+
+    /// Prepare the slot pool for a wholesale GPU pack of `pointCount` points.
+    /// Grows the pool if needed (preserving `pointsPerBatch`), then marks slots
+    /// `0..<numBatches` resident with `numPoints`/`firstPoint`/`state` set on
+    /// the CPU mirror; per-batch `min`/`max` are left zero here and written by
+    /// the GPU directly into ``batchesBuffer``. Returns the number of batches.
+    ///
+    /// The renderer reads ``batchesBuffer`` (which the GPU fills), so rendering
+    /// is correct as soon as the pack command buffer completes — even before
+    /// ``adoptGPUBatchBounds(numBatches:)`` re-syncs the CPU mirror.
+    @discardableResult
+    internal func prepareForGPUPack(pointCount: Int) -> Int {
+        let ppb = capacity.pointsPerBatch
+        let numBatches = max(1, (pointCount + ppb - 1) / ppb)
+        if numBatches > capacity.maxResidentBatches {
+            reallocate(
+                to: ComputeRasteriserCapacity(maxResidentBatches: numBatches, pointsPerBatch: ppb),
+                files: files
+            )
+        }
+        for slot in 0 ..< capacity.maxResidentBatches {
+            if slot < numBatches {
+                let first = slot * ppb
+                let num = min(ppb, pointCount - first)
+                batchMirror[slot] = RasterBatch(
+                    min: .zero, max: .zero,
+                    numPoints: UInt32(num), firstPoint: UInt32(first),
+                    fileIndex: 0, state: 1
+                )
+            } else {
+                batchMirror[slot].state = 0
+                batchMirror[slot].numPoints = 0
+            }
+        }
+        freeSlots = (numBatches ..< capacity.maxResidentBatches).reversed()
+        residentBatchCount = numBatches
+        self.pointCount = pointCount
+        flushBatchMirror()
+        return numBatches
+    }
+
+    /// Copy the GPU-written per-batch `RasterBatch` structs (including the AABBs
+    /// the GPU computed) back into the CPU mirror, so later mirror flushes don't
+    /// clobber them. Call from a command-buffer completion handler after a GPU
+    /// pack, or after `waitUntilCompleted`. ``batchesBuffer`` must be shared.
+    internal func adoptGPUBatchBounds(numBatches: Int) {
+        guard let batchesBuffer, numBatches > 0 else { return }
+        let n = min(numBatches, capacity.maxResidentBatches)
+        let ptr = batchesBuffer.contents().bindMemory(to: RasterBatch.self, capacity: n)
+        for slot in 0 ..< n { batchMirror[slot] = ptr[slot] }
+    }
+
     /// Mark every slot empty without freeing GPU buffers. Cheap; subsequent
     /// `addBatches` reuses slot 0 first.
     public func clearAllBatches() {

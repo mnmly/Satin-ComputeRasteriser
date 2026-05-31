@@ -110,3 +110,97 @@ Bench-based projection: total ctor CPU = 18766 × 0.727ms ≈ 13.6s; total decod
     - if weighted-mean ≤ ~5k pts → proceed to Phase 2 (full pool)
     - if weighted-mean in 5–20k → consider lighter intervention (skip `std::istream`, ~5% win) before lazperf surgery
     - if weighted-mean ≥ 20k → abort pool plan; look elsewhere
+
+---
+
+# GPU pack() — design + plan (2026-05-31)
+
+Goal: GPU implementation of `PackedPointCloudFixtures.pack()` so GPU-resident
+point data (e.g. WABF geometry-node output) becomes a renderable
+`ComputeRasteriserPointCloud` with no CPU round-trip. Additive — CPU `pack()`
+stays as reference/fallback.
+
+## Measurement (Release, 13.6M-point PLY)
+
+`pack()` TOTAL ≈ 1111 ms. Stage breakdown:
+
+| stage            | ms   | %  |
+|------------------|------|----|
+| bounds           | 12   | 1  |
+| morton keys      | 36   | 3  |
+| **sort indices** | 345  | 32 |
+| gather pos+col   | 73   | 7  |
+| **LOD levels**   | 512  | 48 |
+| batch + quantize | 55   | 5  |
+| color pack       | 33   | 3  |
+
+Finding: LOD (48%) > sort (32%); together 80%. GPU LOD voxel-occupancy is as
+important as the sort. Target: tens of ms total on GPU.
+
+## Decisions (confirmed with user)
+
+- Sort: **LSD radix**, 4×8-bit passes over the 30-bit Morton key (not the
+  bitonic sorter in SatinSpark — that's float-key O(N log²N), pads 13.6M→16.7M).
+- LOD: **bit-exact**. Reproduce "lowest sorted index per voxel wins" via
+  `atomic_min(grid[cell], sortedIndex)`. Dense grid under a cell cap; hashed
+  open-addressing fallback for elongated/huge-extent clouds.
+
+## Exact formulas to mirror
+
+- Morton key (sort): normalize by GLOBAL bounds extent, `*1023`, floor to uint,
+  `mortonSpread10` per axis, `key = (sx<<2)|(sy<<1)|sz`.
+- Quantize (per batch): `size=max(bmax-bmin,1e-6)`,
+  `n=clamp((p-bmin)/size,0,0.99999994)`, `q=uint(n*Float(2^30-1))`.
+  NB multiply by `2^30-1`=1073741823 (decode divides by `2^30`).
+  Pack: low=(q>>20)&1023, med=(q>>10)&1023, high=q&1023; word=x|y<<10|z<<20.
+- Color: RGBA8 = clamp(c,0,1)*255 per channel, r|g<<8|b<<16|a<<24.
+- Pool mapping: nbatches=ceil(count/ppb); sorted index i → pool index i;
+  batch s covers [s*ppb, min(s*ppb+ppb,count)), firstPoint=s*ppb, state=1.
+
+## API (Metal-gated, additive)
+
+```swift
+public final class GPUPacker {
+    public init(context: Context, lodLevels: Int = 4, coarseVoxelDivisions: Int = 64)
+    public func pack(positions: MTLBuffer, colors: MTLBuffer, count: Int,
+                     into cloud: ComputeRasteriserPointCloud,
+                     commandBuffer: MTLCommandBuffer)
+}
+extension ComputeRasteriserPointCloud {
+    public func replacePackedPointCloud(packer:device:queue:positions:colors:count:)
+}
+```
+
+## Plan
+
+1. [x] Measure CPU pack() stages.
+2. [x] bounds → morton → radix sort → gather.
+3. [x] batch AABB + quantize + color pack.
+4. [x] LOD voxel occupancy (dense grid; per-axis cells ≤ coarseDiv·2^(L-1), so
+   bounded — no hashed fallback needed for default config; CPU-LOD/skip above cap).
+5. [x] cloud pool resize (prepareForGPUPack) + mirror sync (adoptGPUBatchBounds via
+   completion handler) + public API (GPUPacker + replacePackedPointCloud overload).
+6. [x] parity tests (GPUPackerParityTests) + benchmark.
+
+## Results
+
+- Parity: `gpuPackDecodeMatchesCPUSingleBatch` (decoded pos within quant tol,
+  levels exact) + `gpuPackMultiBatchLevelDistributionMatches` both pass.
+- Benchmark (13.6M PLY): **GPU 15.4 ms vs CPU 1110 ms ≈ 72×**, same 1334 batches.
+- `swift build` + `swift test` (23 tests) green; DocC exit 0, no new warnings.
+- GPU path `#if canImport(Metal)`; CPU `pack()` untouched (Linux/tests unaffected).
+- Throwaway PackBench target removed after measurement.
+
+## WABF integration (consumer, separate repo — not yet wired)
+
+`GeometryAttribute.float3` byteStride = `MemoryLayout<SIMD3<Float>>.stride` = 16,
+`.storageModeShared`; `float4` likewise → shapes match the GPUPacker contract.
+`realize()` can pass `data["Position"]`/`data["Color"]` buffers straight into
+`cloud.replacePackedPointCloud(packer:queue:positions:colors:count:)` — no arrays.
+
+Implementation files:
+- `Sources/SatinComputeRasteriser/GPUPacker.swift` (direct makeLibrary + manual
+  encode, like DisplacementPass/SplatGPUSorter — Satin ComputeProcessor is
+  one-kernel-per-pass, too rigid for this).
+- `Sources/SatinComputeRasteriser/Pipelines/GPUPacker/Shaders.metal`.
+- temp `Sources/PackBench` benchmark target (remove or gate before done).
