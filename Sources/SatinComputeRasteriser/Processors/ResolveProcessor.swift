@@ -17,6 +17,9 @@ open class ResolveProcessor: BaseComputeRasteriserProcessor {
 
     public var pixelBuffer: MTLBuffer? { didSet { set(pixelBuffer, index: .Custom0) } }
     public var outputTexture: MTLTexture? { didSet { set(outputTexture, index: .Custom0) } }
+    /// Per-pixel reversed-Z NDC depth (R32Float; 0 = no cloud). Written
+    /// alongside color so the composite can populate the scene depth buffer.
+    public var depthTexture: MTLTexture? { didSet { set(depthTexture, index: .Custom1) } }
 
     open override func setup() {
         super.setup()
@@ -25,7 +28,7 @@ open class ResolveProcessor: BaseComputeRasteriserProcessor {
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
-        encodeIfReady(commandBuffer, isReady: width > 0 && height > 0 && pixelBuffer != nil && outputTexture != nil)
+        encodeIfReady(commandBuffer, isReady: width > 0 && height > 0 && pixelBuffer != nil && outputTexture != nil && depthTexture != nil)
     }
 
 #if os(macOS) || os(iOS) || os(visionOS)

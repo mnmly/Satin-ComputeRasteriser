@@ -12,6 +12,6 @@ open class NearestResolveProcessor: ResolveProcessor {
     public var colorsBuffer: MTLBuffer? { didSet { set(colorsBuffer, index: .Custom2) } }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
-        encodeIfReady(commandBuffer, isReady: width > 0 && height > 0 && pixelBuffer != nil && indexBuffer != nil && colorsBuffer != nil && outputTexture != nil)
+        encodeIfReady(commandBuffer, isReady: width > 0 && height > 0 && pixelBuffer != nil && indexBuffer != nil && colorsBuffer != nil && outputTexture != nil && depthTexture != nil)
     }
 }

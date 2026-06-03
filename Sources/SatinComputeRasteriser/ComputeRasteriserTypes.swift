@@ -50,6 +50,14 @@ public struct ComputeRasteriserConfiguration: Sendable {
     /// `.highQualityAverage` mode for now.
     public var applyTint: Bool
 
+    /// If true, the final composite writes the cloud's per-pixel reversed-Z
+    /// depth into the render pass's depth attachment and depth-tests against it
+    /// (`.greaterEqual`). This lets regular Satin meshes (e.g. a selection
+    /// bounding box) correctly inter-occlude with the cloud instead of the
+    /// cloud always painting on top. Set `false` to restore the legacy
+    /// always-on-top overlay (e.g. a composite pass with no depth attachment).
+    public var writesSceneDepth: Bool
+
     public init(
         mode: ComputeRasteriserMode = .highQualityAverage,
         depthTolerance: Float = 0.01,
@@ -66,7 +74,8 @@ public struct ComputeRasteriserConfiguration: Sendable {
         maximumPointSize: Float = 1.0,
         pointSizeScale: Float = 1.0,
         applyDisplacement: Bool = false,
-        applyTint: Bool = false
+        applyTint: Bool = false,
+        writesSceneDepth: Bool = true
     ) {
         self.mode = mode
         self.depthTolerance = depthTolerance
@@ -84,6 +93,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.pointSizeScale = pointSizeScale
         self.applyDisplacement = applyDisplacement
         self.applyTint = applyTint
+        self.writesSceneDepth = writesSceneDepth
     }
 }
 

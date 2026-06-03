@@ -14,6 +14,10 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     public private(set) var outputTexture: MTLTexture?
     private var outputTextureB: MTLTexture?
     private var holeFillResultTexture: MTLTexture?
+    /// Per-pixel reversed-Z NDC depth (R32Float; 0 = no cloud) written by the
+    /// resolve pass. Sampled by the depth-aware composite so the cloud
+    /// inter-occludes with regular Satin meshes. See ``ComputeRasteriserConfiguration/writesSceneDepth``.
+    private var depthTexture: MTLTexture?
 
     private var pixelBuffer: MTLBuffer?
     private var nearestDepthBuffer: MTLBuffer?
@@ -32,6 +36,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         var nearestIndexBuffer: MTLBuffer
         var outputTexture: MTLTexture
         var outputTextureB: MTLTexture
+        var depthTexture: MTLTexture
     }
     private var resourceCache: [SIMD2<Int32>: CachedResources] = [:]
     private var resourceCacheLRU: [SIMD2<Int32>] = []
@@ -74,6 +79,34 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         label: "ComputeRasteriserPostProcessor",
         context: context,
         material: postMaterial,
+        colorLoadAction: .load,
+        depthLoadAction: .load
+    )
+
+    // Depth-aware variant of the composite. Label drives the shader function
+    // names (`computeRasteriserPostDepthVertex/Fragment` in Post.metal). Tests
+    // the cloud's per-pixel depth against the scene depth (`.greaterEqual`,
+    // reversed-Z) so meshes inter-occlude with the cloud. Test-only (no depth
+    // write) — the cloud composites last among 3D content. Used when
+    // `configuration.writesSceneDepth` is true.
+    private lazy var postDepthMaterial: SourceMaterial = {
+        let material = SourceMaterial(
+            context: context,
+            pipelineURL: Self.pipelinesURL.appendingPathComponent("Post.metal"),
+            live: true
+        )
+        material.label = "ComputeRasteriserPostDepth"
+        material.lighting = false
+        material.depthWriteEnabled = false
+        material.depthCompareFunction = .greaterEqual
+        material.blending = .alpha
+        return material
+    }()
+
+    private lazy var postDepthProcessor = PostProcessEncoder(
+        label: "ComputeRasteriserPostDepthProcessor",
+        context: context,
+        material: postDepthMaterial,
         colorLoadAction: .load,
         depthLoadAction: .load
     )
@@ -241,6 +274,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
 
         resolveProcessor.pixelBuffer = pixelBuffer
         resolveProcessor.outputTexture = outputTexture
+        resolveProcessor.depthTexture = depthTexture
         resolveProcessor.update(commandBuffer)
     }
 
@@ -268,6 +302,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestResolveProcessor.indexBuffer = nearestIndexBuffer
         nearestResolveProcessor.colorsBuffer = cloud.colorsBuffer
         nearestResolveProcessor.outputTexture = outputTexture
+        nearestResolveProcessor.depthTexture = depthTexture
         nearestResolveProcessor.update(commandBuffer)
     }
 
@@ -302,8 +337,14 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     public func draw(renderPassDescriptor: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer) {
         let finalTexture = holeFillResultTexture ?? outputTexture
         guard let finalTexture else { return }
-        postMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
-        postProcessor.draw(renderPassDescriptor: renderPassDescriptor, commandBuffer: commandBuffer)
+        if configuration.writesSceneDepth, let depthTexture {
+            postDepthMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
+            postDepthMaterial.set(depthTexture, index: FragmentTextureIndex.Custom2)
+            postDepthProcessor.draw(renderPassDescriptor: renderPassDescriptor, commandBuffer: commandBuffer)
+        } else {
+            postMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
+            postProcessor.draw(renderPassDescriptor: renderPassDescriptor, commandBuffer: commandBuffer)
+        }
     }
 
     /// Variant that composites onto a specific sub-region of the render target,
@@ -317,12 +358,22 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     ) {
         let finalTexture = holeFillResultTexture ?? outputTexture
         guard let finalTexture else { return }
-        postMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
-        postProcessor.draw(
-            renderPassDescriptor: renderPassDescriptor,
-            commandBuffer: commandBuffer,
-            viewports: [viewport]
-        )
+        if configuration.writesSceneDepth, let depthTexture {
+            postDepthMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
+            postDepthMaterial.set(depthTexture, index: FragmentTextureIndex.Custom2)
+            postDepthProcessor.draw(
+                renderPassDescriptor: renderPassDescriptor,
+                commandBuffer: commandBuffer,
+                viewports: [viewport]
+            )
+        } else {
+            postMaterial.set(finalTexture, index: FragmentTextureIndex.Custom1)
+            postProcessor.draw(
+                renderPassDescriptor: renderPassDescriptor,
+                commandBuffer: commandBuffer,
+                viewports: [viewport]
+            )
+        }
     }
 
     private func bind(_ cloud: ComputeRasteriserPointCloud, to processor: DepthPassProcessor, pixelBuffer: MTLBuffer) {
@@ -374,6 +425,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestIndexBuffer = resources.nearestIndexBuffer
         outputTexture = resources.outputTexture
         outputTextureB = resources.outputTextureB
+        depthTexture = resources.depthTexture
         holeFillResultTexture = resources.outputTexture
 
         clearProcessor.pixelCount = pixelCount
@@ -385,6 +437,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestResolveProcessor.height = height
         nearestResolveProcessor.backgroundColor = configuration.backgroundColor
         postProcessor.resize(size: (Float(width), Float(height)), scaleFactor: scaleFactor)
+        postDepthProcessor.resize(size: (Float(width), Float(height)), scaleFactor: scaleFactor)
     }
 
     private func allocateAndCache(width: Int, height: Int, key: SIMD2<Int32>) -> CachedResources {
@@ -406,13 +459,15 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestIndex.label = "\(label).NearestIndices[\(width)x\(height)]"
         let outA = makeOutputTexture(width: width, height: height, label: "\(label).Output[\(width)x\(height)]")!
         let outB = makeOutputTexture(width: width, height: height, label: "\(label).OutputB[\(width)x\(height)]")!
+        let depth = makeDepthTexture(width: width, height: height, label: "\(label).Depth[\(width)x\(height)]")!
 
         let resources = CachedResources(
             pixelBuffer: pixel,
             nearestDepthBuffer: nearestDepth,
             nearestIndexBuffer: nearestIndex,
             outputTexture: outA,
-            outputTextureB: outB
+            outputTextureB: outB,
+            depthTexture: depth
         )
         resourceCache[key] = resources
 
@@ -450,6 +505,23 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             mipmapped: false
         )
         descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        descriptor.storageMode = .private
+        let texture = context.device.makeTexture(descriptor: descriptor)
+        texture?.label = label
+        return texture
+    }
+
+    /// R32Float depth target: written by the resolve compute pass, sampled by
+    /// the depth-aware composite. Not a render target (depth lives in the host
+    /// render pass's own attachment), so usage is shader read/write only.
+    private func makeDepthTexture(width: Int, height: Int, label: String) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r32Float,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
         descriptor.storageMode = .private
         let texture = context.device.makeTexture(descriptor: descriptor)
         texture?.label = label

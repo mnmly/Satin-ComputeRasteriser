@@ -11,6 +11,7 @@ kernel void nearestResolveUpdate(
     device const uint *indices [[buffer(ComputeBufferCustom1)]],
     device const uint *colors [[buffer(ComputeBufferCustom2)]],
     texture2d<float, access::write> outputTexture [[texture(ComputeTextureCustom0)]],
+    texture2d<float, access::write> depthTexture [[texture(ComputeTextureCustom1)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= uint(uniforms.screenSize.x) || gid.y >= uint(uniforms.screenSize.y)) {
@@ -22,6 +23,7 @@ kernel void nearestResolveUpdate(
     const uint pointIndex = indices[pixelIndex];
     if (depth == 0u || pointIndex == 0xffffffffu) {
         outputTexture.write(float4(uniforms.backgroundColor.rgb, 0.0), gid);
+        depthTexture.write(float4(0.0), gid);   // 0 = no cloud (far in reversed-Z)
         return;
     }
 
@@ -32,4 +34,5 @@ kernel void nearestResolveUpdate(
         float((rgba >> 16u) & 0xffu)
     ) / 255.0;
     outputTexture.write(float4(rgb, 1.0), gid);
+    depthTexture.write(float4(uintToDepthReverseZ(depth)), gid);
 }
