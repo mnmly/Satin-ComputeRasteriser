@@ -204,6 +204,23 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         clearProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
         clearProcessor.update(commandBuffer)
 
+        // Depth and color are split into two passes ACROSS all clouds, not
+        // interleaved per cloud. The color pass only commits a fragment whose
+        // depth is within tolerance of the pixel's winning depth, and those
+        // colour adds are atomic and irreversible. If we ran depth+color per
+        // cloud, an earlier-iterated (farther) cloud would commit its colour
+        // before a later (nearer) cloud lowered the pixel depth — its colour
+        // could not then be retracted, so occlusion would depend on load order.
+        // Running every cloud's depth pass first settles the global nearest
+        // depth per pixel; only then does any colour accumulate. Occlusion is
+        // therefore a pure function of depth, independent of cloud order.
+        //
+        // The cull/visible/indirect-args buffers are per-cloud, so each cloud
+        // keeps its phase-1 cull result for phase 2. Metal's automatic hazard
+        // tracking on the shared (private) pixelBuffer serialises the two
+        // phases — same guarantee the per-cloud depth→color ordering already
+        // relied on. Pass counts are unchanged: cull+depth+color once each.
+        var culledClouds: [ComputeRasteriserPointCloud] = []
         for cloud in pointClouds where cloud.visible && cloud.residentBatchCount > 0 {
             guard runCullPass(commandBuffer, cloud: cloud) else { continue }
 
@@ -211,6 +228,10 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             bindDisplacement(cloud, to: depthProcessor)
             depthProcessor.update(commandBuffer)
 
+            culledClouds.append(cloud)
+        }
+
+        for cloud in culledClouds {
             bind(cloud, to: colorProcessor, pixelBuffer: pixelBuffer)
             bindDisplacement(cloud, to: colorProcessor)
             bindTint(cloud, to: colorProcessor)
