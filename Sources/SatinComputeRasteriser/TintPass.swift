@@ -17,9 +17,12 @@ import Satin
 ///   * `RasterBatch`, `scr_decodePointAt`, and `scr_resolveTintThread` —
 ///     all identical to their displacement counterparts (point decode +
 ///     thread/slot resolution).
-///   * `SCR_TINT_KERNEL_BUFFERS` macro — expands to the seven buffer
-///     declarations the pass binds automatically (slots 0–6). User
-///     uniforms bind at ``TintPass/bufferUser0`` (slot 7) onward.
+///   * `SCR_TINT_KERNEL_BUFFERS` macro — expands to the buffer declarations
+///     the pass binds automatically (slots 0–7), including `colors` (the
+///     native packed-RGBA8 per-point colour). User uniforms bind at
+///     ``TintPass/bufferUser0`` (slot 8) onward.
+///   * `scr_decodeColorAt(pointIndex, colors)` — the point's current colour
+///     as 0..1 rgba, for colour-driven tints (e.g. `length(rgb)` ramps).
 ///   * `SCR_TINT_BUF_*` slot constants for kernel `[[buffer(...)]]` attrs.
 ///
 /// The output buffer is `device float4 *tints` (RGBA per point). The
@@ -32,9 +35,9 @@ import Satin
 public final class TintPass {
     // MARK: - Buffer slot constants
     //
-    // These mirror `SCR_TINT_BUF_*` in the metal preamble. Slots 0–6 are
-    // bound by the pass automatically; slots 7–14 are reserved for user
-    // uniforms.
+    // These mirror `SCR_TINT_BUF_*` in the metal preamble. Slots 0–7 are
+    // bound by the pass automatically (slot 7 = native colours); slots 8–15
+    // are reserved for user uniforms.
     public static let bufferBatches: Int = 0
     public static let bufferXYZLow: Int  = 1
     public static let bufferXYZMed: Int  = 2
@@ -42,14 +45,17 @@ public final class TintPass {
     public static let bufferLevels: Int  = 4
     public static let bufferTints: Int   = 5
     public static let bufferInfo: Int    = 6
-    public static let bufferUser0: Int   = 7
-    public static let bufferUser1: Int   = 8
-    public static let bufferUser2: Int   = 9
-    public static let bufferUser3: Int   = 10
-    public static let bufferUser4: Int   = 11
-    public static let bufferUser5: Int   = 12
-    public static let bufferUser6: Int   = 13
-    public static let bufferUser7: Int   = 14
+    /// Native per-point colours (packed RGBA8, one `uint` per point), so a tint
+    /// kernel can read each point's current colour — e.g. `scr_decodeColorAt`.
+    public static let bufferColors: Int  = 7
+    public static let bufferUser0: Int   = 8
+    public static let bufferUser1: Int   = 9
+    public static let bufferUser2: Int   = 10
+    public static let bufferUser3: Int   = 11
+    public static let bufferUser4: Int   = 12
+    public static let bufferUser5: Int   = 13
+    public static let bufferUser6: Int   = 14
+    public static let bufferUser7: Int   = 15
 
     /// Bind extra uniforms / buffers each frame. Called inside the compute
     /// encoder after the pass's own bindings, before dispatch. Bind to
@@ -121,6 +127,7 @@ public final class TintPass {
               let xyzMed = target.xyzMedBuffer,
               let xyzHigh = target.xyzHighBuffer,
               let levels = target.levelsBuffer,
+              let colors = target.colorsBuffer,
               let info = infoBuffer
         else { return }
 
@@ -149,6 +156,7 @@ public final class TintPass {
         encoder.setBuffer(levels,        offset: 0, index: Self.bufferLevels)
         encoder.setBuffer(out,           offset: 0, index: Self.bufferTints)
         encoder.setBuffer(info,          offset: 0, index: Self.bufferInfo)
+        encoder.setBuffer(colors,        offset: 0, index: Self.bufferColors)
         bindUserBuffers?(encoder)
 
         let gridSize = target.capacity.maxResidentBatches * target.capacity.pointsPerBatch
@@ -207,14 +215,15 @@ public final class TintPass {
     #define SCR_TINT_BUF_LEVELS    4
     #define SCR_TINT_BUF_OUT       5
     #define SCR_TINT_BUF_INFO      6
-    #define SCR_TINT_BUF_USER0     7
-    #define SCR_TINT_BUF_USER1     8
-    #define SCR_TINT_BUF_USER2     9
-    #define SCR_TINT_BUF_USER3     10
-    #define SCR_TINT_BUF_USER4     11
-    #define SCR_TINT_BUF_USER5     12
-    #define SCR_TINT_BUF_USER6     13
-    #define SCR_TINT_BUF_USER7     14
+    #define SCR_TINT_BUF_COLORS    7
+    #define SCR_TINT_BUF_USER0     8
+    #define SCR_TINT_BUF_USER1     9
+    #define SCR_TINT_BUF_USER2     10
+    #define SCR_TINT_BUF_USER3     11
+    #define SCR_TINT_BUF_USER4     12
+    #define SCR_TINT_BUF_USER5     13
+    #define SCR_TINT_BUF_USER6     14
+    #define SCR_TINT_BUF_USER7     15
 
     typedef struct {
         int  state;
@@ -274,6 +283,17 @@ public final class TintPass {
         return float3(x, y, z) * (wgSize / SCR_STEPS_10BIT) + wgMin;
     }
 
+    // Decode a point's native colour (packed RGBA8, little-endian) to 0..1 rgba.
+    // `pointIndex` is the same index `scr_resolveTintThread` yields, so this reads
+    // the exact colour the ColorPass would otherwise blend into.
+    inline float4 scr_decodeColorAt(uint pointIndex, device const uint *colors) {
+        const uint c = colors[pointIndex];
+        return float4(float( c        & 0xffu),
+                      float((c >>  8) & 0xffu),
+                      float((c >> 16) & 0xffu),
+                      float((c >> 24) & 0xffu)) * (1.0 / 255.0);
+    }
+
     inline bool scr_resolveTintThread(
         uint id,
         constant ScrTintInfo &info,
@@ -297,7 +317,8 @@ public final class TintPass {
         device const uint        *xyzHigh            [[buffer(SCR_TINT_BUF_XYZ_HIGH)]], \\
         device const uchar       *levels             [[buffer(SCR_TINT_BUF_LEVELS)]], \\
         device       float4      *tints              [[buffer(SCR_TINT_BUF_OUT)]], \\
-        constant     ScrTintInfo &_scrInfo           [[buffer(SCR_TINT_BUF_INFO)]]
+        constant     ScrTintInfo &_scrInfo           [[buffer(SCR_TINT_BUF_INFO)]], \\
+        device const uint        *colors             [[buffer(SCR_TINT_BUF_COLORS)]]
 
     """
 }
