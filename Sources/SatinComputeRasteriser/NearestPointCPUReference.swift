@@ -159,7 +159,9 @@ enum NearestPointCPUReference {
             makePlane(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]),
             makePlane(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]),
             makePlane(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]),
-            makePlane(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]),
+            // Near plane uses Metal's z ∈ [0,1] clip convention (just the z row),
+            // not OpenGL's z ∈ [-1,1] form. Mirrors intersectsFrustum in Common.metal.
+            makePlane(m[0][2], m[1][2], m[2][2], m[3][2]),
         ]
 
         for plane in planes {

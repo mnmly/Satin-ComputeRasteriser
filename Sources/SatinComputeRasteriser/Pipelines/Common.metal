@@ -118,7 +118,11 @@ inline bool intersectsFrustum(float4x4 m, float3 wgMin, float3 wgMax) {
         makePlane(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]),
         makePlane(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]),
         makePlane(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]),
-        makePlane(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]),
+        // Near plane uses Metal's z ∈ [0,1] clip convention (just the z row),
+        // not OpenGL's z ∈ [-1,1] form (w + z rows). The latter over-culls near
+        // the camera, badly so for orthographic projections where the w row is a
+        // pure constant offset rather than depth-dependent.
+        makePlane(m[0][2], m[1][2], m[2][2], m[3][2]),
     };
 
     for (int i = 0; i < 6; i++) {
