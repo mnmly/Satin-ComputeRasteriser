@@ -96,9 +96,11 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     // Depth-aware variant of the composite. Label drives the shader function
     // names (`computeRasteriserPostDepthVertex/Fragment` in Post.metal). Tests
     // the cloud's per-pixel depth against the scene depth (`.greaterEqual`,
-    // reversed-Z) so meshes inter-occlude with the cloud. Test-only (no depth
-    // write) — the cloud composites last among 3D content. Used when
-    // `configuration.writesSceneDepth` is true.
+    // reversed-Z) so meshes inter-occlude with the cloud, AND writes that depth
+    // back into the attachment so downstream depth consumers (a depth-of-field
+    // post pass, etc.) see the cloud at its true distance — matching the
+    // documented ``ComputeRasteriserConfiguration/writesSceneDepth`` behavior.
+    // Used when `configuration.writesSceneDepth` is true.
     private lazy var postDepthMaterial: SourceMaterial = {
         let material = SourceMaterial(
             context: context,
@@ -107,7 +109,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         )
         material.label = "ComputeRasteriserPostDepth"
         material.lighting = false
-        material.depthWriteEnabled = false
+        material.depthWriteEnabled = true
         material.depthCompareFunction = .greaterEqual
         material.blending = .alpha
         return material
