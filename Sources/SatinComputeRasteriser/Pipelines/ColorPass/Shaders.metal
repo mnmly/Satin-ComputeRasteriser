@@ -85,6 +85,11 @@ kernel void colorPassUpdate(
 
         if (uniforms.applyTint != 0) {
             const float4 tint = tints[pointIndex];
+            // Discard sentinel: a negative tint alpha drops this point entirely
+            // (no colour write, count not incremented). A pixel covered only by
+            // discarded points resolves to count==0 → background alpha 0, i.e.
+            // the point becomes fully transparent.
+            if (tint.a < 0.0) { continue; }
             const float w = saturate(tint.a);
             const float3 orig = float3(float(r), float(g), float(b)) * (1.0 / 255.0);
             const float3 mixed = mix(orig, saturate(tint.rgb), w);

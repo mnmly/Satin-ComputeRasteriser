@@ -27,7 +27,9 @@ import Satin
 ///
 /// The output buffer is `device float4 *tints` (RGBA per point). The
 /// ColorPass composes `final = mix(stored.rgb, tint.rgb, tint.a)`, so
-/// `tint.a==0` is a pass-through and `tint.a==1` is a full replacement.
+/// `tint.a==0` is a pass-through and `tint.a==1` is a full replacement. A
+/// **negative** `tint.a` is a discard sentinel: the point is dropped (no colour
+/// write), so a pixel covered only by such points resolves fully transparent.
 ///
 /// **Cloud targeting.** ``encode(commandBuffer:cloud:)`` defaults to the
 /// first cloud on the rasteriser. Pass `cloud:` explicitly for multi-cloud
