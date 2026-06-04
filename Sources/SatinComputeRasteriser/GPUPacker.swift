@@ -42,6 +42,7 @@ public final class GPUPacker {
         var level: UInt32 = 0
         var coarseVoxelDivisions: Float = 0
         var lodVoxelScale: Float = 0
+        var slotBase: UInt32 = 0
     }
 
     private let context: Context
@@ -53,13 +54,14 @@ public final class GPUPacker {
     private let pGather, pBatchAABB, pQuantize: MTLComputePipelineState
     private let pLODInit, pLODClaim, pLODAssign: MTLComputePipelineState
 
-    // Scratch, grown to fit the largest pack seen so far.
-    private var capacityPoints = 0
-    private var keysA, keysB, indicesA, indicesB: MTLBuffer?
-    private var sortedPos, boundsBuf: MTLBuffer?
-    private var histBuf, tileOffsetBuf, digitTotalBuf, digitBaseBuf: MTLBuffer?
-    private var lodGrid: MTLBuffer?
-    private var lodGridCells = 0
+    /// Independent scratch sets. A single set is reused (Metal hazard-tracking
+    /// serialises packs that share it). ``addRawChunksGPU`` rings over several
+    /// so chunks in one command buffer pack into *different* scratch and can
+    /// overlap on the GPU. Each set grows to the largest pack it has seen.
+    private var scratchSets: [PackScratch] = []
+    /// Dense-LOD grid cell count (0 = LOD disabled: grid would exceed the cap).
+    /// Computed once; each scratch set allocates its own grid of this size.
+    private let lodGridCellCount: Int
 
     /// - Parameters:
     ///   - context: Satin context (provides the Metal device).
@@ -73,8 +75,25 @@ public final class GPUPacker {
         coarseVoxelDivisions: Int = PackedPointCloudFixtures.defaultCoarseVoxelDivisions
     ) throws {
         self.context = context
-        self.lodLevels = max(1, min(lodLevels, 8))
-        self.coarseVoxelDivisions = max(1, coarseVoxelDivisions)
+        let clampedLevels = max(1, min(lodLevels, 8))
+        let clampedDivs = max(1, coarseVoxelDivisions)
+        self.lodLevels = clampedLevels
+        self.coarseVoxelDivisions = clampedDivs
+
+        // Per-axis cell count ≤ coarseVoxelDivisions·2^(lodLevels-2) (voxel size
+        // scales with the longest axis). +2 guards the floor()+1 dim formula.
+        if clampedLevels > 1 {
+            let maxDim = clampedDivs * (1 << (clampedLevels - 2)) + 2
+            let cells = maxDim * maxDim * maxDim
+            if cells <= Self.lodCellCap {
+                self.lodGridCellCount = cells
+            } else {
+                print("[GPUPacker] LOD grid \(cells) cells exceeds cap \(Self.lodCellCap); GPU LOD disabled (levels left at finest).")
+                self.lodGridCellCount = 0
+            }
+        } else {
+            self.lodGridCellCount = 0
+        }
 
         let url = ComputeRasteriser.pipelinesURL
             .appendingPathComponent("GPUPacker")
@@ -125,17 +144,87 @@ public final class GPUPacker {
             cloud.clearAllBatches()
             return
         }
-        let ppb = cloud.capacity.pointsPerBatch
         let numBatches = cloud.prepareForGPUPack(pointCount: count)
-        ensureScratch(count: count)
+        encodePack(
+            positions: positions, colors: colors, count: count,
+            firstSlot: 0, numBatches: numBatches, scratch: scratch(0, count: count),
+            into: cloud, commandBuffer: commandBuffer
+        )
+        commandBuffer.addCompletedHandler { _ in
+            cloud.adoptGPUBatchBounds(numBatches: numBatches)
+        }
+    }
 
-        guard let keysA, let keysB, let indicesA, let indicesB,
-              let sortedPos, let boundsBuf,
-              let histBuf, let tileOffsetBuf, let digitTotalBuf, let digitBaseBuf,
+    /// Pack one chunk of GPU-resident points into a **contiguous run of pool
+    /// slots** starting at `firstSlot`, leaving all other slots untouched —
+    /// the streaming building block. The caller is responsible for reserving
+    /// `ceil(count / pointsPerBatch)` free contiguous slots and for the CPU
+    /// mirror bookkeeping (see ``ComputeRasteriserPointCloud/addRawChunksGPU(packer:queue:chunks:)``).
+    ///
+    /// Decode-identical to ``pack(positions:colors:count:into:commandBuffer:)``
+    /// — only the destination slot range differs (via per-buffer offsets and a
+    /// `slotBase` that makes each batch's `firstPoint` absolute).
+    ///
+    /// - Parameters:
+    ///   - positions: `float3` positions for this chunk (16-byte stride, shared).
+    ///   - colors: `float4` RGBA `[0,1]` for this chunk (shared).
+    ///   - count: number of points in this chunk.
+    ///   - firstSlot: pool slot index of this chunk's first batch.
+    ///   - cloud: destination pool (must already have the slots reserved).
+    ///   - commandBuffer: caller commits; many `packChunk` calls may share one.
+    public func packChunk(
+        positions: MTLBuffer,
+        colors: MTLBuffer,
+        count: Int,
+        firstSlot: Int,
+        scratchIndex: Int = 0,
+        into cloud: ComputeRasteriserPointCloud,
+        commandBuffer: MTLCommandBuffer
+    ) {
+        guard count > 0 else { return }
+        let ppb = cloud.capacity.pointsPerBatch
+        let numBatches = max(1, (count + ppb - 1) / ppb)
+        encodePack(
+            positions: positions, colors: colors, count: count,
+            firstSlot: firstSlot, numBatches: numBatches,
+            scratch: scratch(scratchIndex, count: count),
+            into: cloud, commandBuffer: commandBuffer
+        )
+    }
+
+    /// Encode all pack stages for `count` points into the slot range
+    /// `[firstSlot, firstSlot + numBatches)`. Output pool buffers are bound at
+    /// the slot's byte offset so the kernels (which index locally, 0..count and
+    /// 0..numBatches) land in the right place; `slotBase` makes the per-batch
+    /// `firstPoint` absolute. No CPU bookkeeping or completion handler here.
+    private func encodePack(
+        positions: MTLBuffer,
+        colors: MTLBuffer,
+        count: Int,
+        firstSlot: Int,
+        numBatches: Int,
+        scratch: PackScratch,
+        into cloud: ComputeRasteriserPointCloud,
+        commandBuffer: MTLCommandBuffer
+    ) {
+        let ppb = cloud.capacity.pointsPerBatch
+
+        guard let keysA = scratch.keysA, let keysB = scratch.keysB,
+              let indicesA = scratch.indicesA, let indicesB = scratch.indicesB,
+              let sortedPos = scratch.sortedPos, let boundsBuf = scratch.boundsBuf,
+              let histBuf = scratch.histBuf, let tileOffsetBuf = scratch.tileOffsetBuf,
+              let digitTotalBuf = scratch.digitTotalBuf, let digitBaseBuf = scratch.digitBaseBuf,
               let xyzLow = cloud.xyzLowBuffer, let xyzMed = cloud.xyzMedBuffer,
               let xyzHigh = cloud.xyzHighBuffer, let colorsOut = cloud.colorsBuffer,
               let levels = cloud.levelsBuffer, let batches = cloud.batchesBuffer
         else { return }
+
+        // Byte offsets into the pool for this chunk's slot run.
+        let pointBase = firstSlot * ppb
+        let xyzOff = pointBase * MemoryLayout<UInt32>.stride
+        let colOff = pointBase * MemoryLayout<UInt32>.stride
+        let lvlOff = pointBase * MemoryLayout<UInt8>.stride
+        let batchOff = firstSlot * MemoryLayout<RasterBatch>.stride
 
         let numTiles = (count + Self.radixTileSize - 1) / Self.radixTileSize
         var params = PackParams(
@@ -148,10 +237,11 @@ public final class GPUPacker {
             maxLevel: UInt32(lodLevels - 1),
             level: 0,
             coarseVoxelDivisions: Float(coarseVoxelDivisions),
-            lodVoxelScale: 1.0
+            lodVoxelScale: 1.0,
+            slotBase: UInt32(firstSlot)
         )
 
-        // 1. Global bounds.
+        // 1. Chunk-local bounds.
         encode(commandBuffer, pBoundsInit, threads: 6) { e in
             e.setBuffer(boundsBuf, offset: 0, index: 0)
         }
@@ -204,110 +294,78 @@ public final class GPUPacker {
         // After 4 swaps the sorted indices are back in indicesA (== iIn).
         let sortedIndices = iIn
 
-        // 4. Gather sorted positions + pack colors into the pool.
+        // 4. Gather sorted positions + pack colors into the pool slot run.
         encode(commandBuffer, pGather, threads: count) { e in
             e.setBuffer(positions, offset: 0, index: 0)
             e.setBuffer(colors, offset: 0, index: 1)
             e.setBuffer(sortedIndices, offset: 0, index: 2)
             e.setBuffer(sortedPos, offset: 0, index: 3)
-            e.setBuffer(colorsOut, offset: 0, index: 4)
+            e.setBuffer(colorsOut, offset: colOff, index: 4)
             e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
         }
 
-        // 5. Per-batch AABB → batch metadata.
+        // 5. Per-batch AABB → batch metadata at batches[firstSlot..].
         encodeGroups(commandBuffer, pBatchAABB, groups: numBatches, threadsPerGroup: 256) { e in
             e.setBuffer(sortedPos, offset: 0, index: 0)
-            e.setBuffer(batches, offset: 0, index: 1)
+            e.setBuffer(batches, offset: batchOff, index: 1)
             e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 2)
         }
 
-        // 6. Quantize → xyzLow/Med/High.
+        // 6. Quantize → xyzLow/Med/High at the slot run.
         encode(commandBuffer, pQuantize, threads: count) { e in
             e.setBuffer(sortedPos, offset: 0, index: 0)
-            e.setBuffer(batches, offset: 0, index: 1)
-            e.setBuffer(xyzLow, offset: 0, index: 2)
-            e.setBuffer(xyzMed, offset: 0, index: 3)
-            e.setBuffer(xyzHigh, offset: 0, index: 4)
+            e.setBuffer(batches, offset: batchOff, index: 1)
+            e.setBuffer(xyzLow, offset: xyzOff, index: 2)
+            e.setBuffer(xyzMed, offset: xyzOff, index: 3)
+            e.setBuffer(xyzHigh, offset: xyzOff, index: 4)
             e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
         }
 
-        // 7. LOD voxel occupancy.
+        // 7. LOD voxel occupancy → levels at the slot run.
         encode(commandBuffer, pLODInit, threads: count) { e in
-            e.setBuffer(levels, offset: 0, index: 0)
+            e.setBuffer(levels, offset: lvlOff, index: 0)
             e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 1)
         }
-        if lodLevels > 1, let lodGrid {
+        if lodLevels > 1, let lodGrid = scratch.lodGrid {
             for level in 0 ..< (lodLevels - 1) {
                 params.level = UInt32(level)
                 params.lodVoxelScale = powf(0.5, Float(level))
                 if let blit = commandBuffer.makeBlitCommandEncoder() {
                     blit.label = "GPUPacker.LODGridFill"
-                    blit.fill(buffer: lodGrid, range: 0 ..< (lodGridCells * 4), value: 0xff)
+                    blit.fill(buffer: lodGrid, range: 0 ..< (lodGridCellCount * 4), value: 0xff)
                     blit.endEncoding()
                 }
                 encode(commandBuffer, pLODClaim, threads: count) { e in
                     e.setBuffer(sortedPos, offset: 0, index: 0)
-                    e.setBuffer(levels, offset: 0, index: 1)
+                    e.setBuffer(levels, offset: lvlOff, index: 1)
                     e.setBuffer(lodGrid, offset: 0, index: 2)
                     e.setBuffer(boundsBuf, offset: 0, index: 3)
                     e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 4)
                 }
                 encode(commandBuffer, pLODAssign, threads: count) { e in
                     e.setBuffer(sortedPos, offset: 0, index: 0)
-                    e.setBuffer(levels, offset: 0, index: 1)
+                    e.setBuffer(levels, offset: lvlOff, index: 1)
                     e.setBuffer(lodGrid, offset: 0, index: 2)
                     e.setBuffer(boundsBuf, offset: 0, index: 3)
                     e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 4)
                 }
             }
         }
-
-        commandBuffer.addCompletedHandler { _ in
-            cloud.adoptGPUBatchBounds(numBatches: numBatches)
-        }
     }
 
     // MARK: - Scratch
 
-    private func ensureScratch(count: Int) {
-        if count > capacityPoints {
-            let device = context.device
-            let uintLen = count * MemoryLayout<UInt32>.stride
-            let numTiles = (count + Self.radixTileSize - 1) / Self.radixTileSize
-            keysA = device.makeBuffer(length: uintLen, options: .storageModePrivate)
-            keysB = device.makeBuffer(length: uintLen, options: .storageModePrivate)
-            indicesA = device.makeBuffer(length: uintLen, options: .storageModePrivate)
-            indicesB = device.makeBuffer(length: uintLen, options: .storageModePrivate)
-            sortedPos = device.makeBuffer(length: count * MemoryLayout<SIMD3<Float>>.stride, options: .storageModePrivate)
-            histBuf = device.makeBuffer(length: numTiles * 256 * 4, options: .storageModePrivate)
-            tileOffsetBuf = device.makeBuffer(length: numTiles * 256 * 4, options: .storageModePrivate)
-            keysA?.label = "GPUPacker.keysA"; keysB?.label = "GPUPacker.keysB"
-            indicesA?.label = "GPUPacker.indicesA"; indicesB?.label = "GPUPacker.indicesB"
-            sortedPos?.label = "GPUPacker.sortedPos"
-            capacityPoints = count
+    /// Return scratch set `index` (creating sets as needed), grown to fit
+    /// `count` points. Sets are independent so chunks assigned to different
+    /// sets in one command buffer overlap on the GPU instead of serialising.
+    private func scratch(_ index: Int, count: Int) -> PackScratch {
+        while scratchSets.count <= index {
+            scratchSets.append(PackScratch())
         }
-        if boundsBuf == nil {
-            boundsBuf = context.device.makeBuffer(length: 6 * 4, options: .storageModePrivate)
-            digitTotalBuf = context.device.makeBuffer(length: 256 * 4, options: .storageModePrivate)
-            digitBaseBuf = context.device.makeBuffer(length: 256 * 4, options: .storageModePrivate)
-            boundsBuf?.label = "GPUPacker.bounds"
-        }
-        ensureLODGrid()
-    }
-
-    private func ensureLODGrid() {
-        guard lodLevels > 1, lodGrid == nil else { return }
-        // Per-axis cell count ≤ coarseVoxelDivisions·2^(lodLevels-2) (voxel size
-        // scales with the longest axis). +2 guards the floor()+1 dim formula.
-        let maxDim = coarseVoxelDivisions * (1 << (lodLevels - 2)) + 2
-        let cells = maxDim * maxDim * maxDim
-        guard cells <= Self.lodCellCap else {
-            print("[GPUPacker] LOD grid \(cells) cells exceeds cap \(Self.lodCellCap); GPU LOD disabled (levels left at finest).")
-            return
-        }
-        lodGrid = context.device.makeBuffer(length: cells * 4, options: .storageModePrivate)
-        lodGrid?.label = "GPUPacker.lodGrid"
-        lodGridCells = cells
+        let s = scratchSets[index]
+        s.ensure(device: context.device, count: count,
+                 radixTileSize: Self.radixTileSize, lodGridCellCount: lodGridCellCount)
+        return s
     }
 
     // MARK: - Encode helpers
@@ -344,6 +402,44 @@ public final class GPUPacker {
     }
 }
 
+/// One independent set of GPU-private scratch buffers for a single in-flight
+/// pack: radix keys/indices/sorted-positions, histogram/scan temporaries, and
+/// the dense LOD voxel grid. ``GPUPacker`` keeps a ring of these so several
+/// chunks packed into one command buffer use *different* scratch and overlap on
+/// the GPU rather than serialising under Metal hazard tracking.
+private final class PackScratch {
+    var capacityPoints = 0
+    var keysA, keysB, indicesA, indicesB: MTLBuffer?
+    var sortedPos, boundsBuf: MTLBuffer?
+    var histBuf, tileOffsetBuf, digitTotalBuf, digitBaseBuf: MTLBuffer?
+    var lodGrid: MTLBuffer?
+
+    /// Grow the per-point buffers to `count` (no-op if already big enough) and
+    /// lazily allocate the fixed-size and LOD-grid buffers.
+    func ensure(device: MTLDevice, count: Int, radixTileSize: Int, lodGridCellCount: Int) {
+        if count > capacityPoints {
+            let uintLen = count * MemoryLayout<UInt32>.stride
+            let numTiles = (count + radixTileSize - 1) / radixTileSize
+            keysA = device.makeBuffer(length: uintLen, options: .storageModePrivate)
+            keysB = device.makeBuffer(length: uintLen, options: .storageModePrivate)
+            indicesA = device.makeBuffer(length: uintLen, options: .storageModePrivate)
+            indicesB = device.makeBuffer(length: uintLen, options: .storageModePrivate)
+            sortedPos = device.makeBuffer(length: count * MemoryLayout<SIMD3<Float>>.stride, options: .storageModePrivate)
+            histBuf = device.makeBuffer(length: numTiles * 256 * 4, options: .storageModePrivate)
+            tileOffsetBuf = device.makeBuffer(length: numTiles * 256 * 4, options: .storageModePrivate)
+            capacityPoints = count
+        }
+        if boundsBuf == nil {
+            boundsBuf = device.makeBuffer(length: 6 * 4, options: .storageModePrivate)
+            digitTotalBuf = device.makeBuffer(length: 256 * 4, options: .storageModePrivate)
+            digitBaseBuf = device.makeBuffer(length: 256 * 4, options: .storageModePrivate)
+        }
+        if lodGridCellCount > 0, lodGrid == nil {
+            lodGrid = device.makeBuffer(length: lodGridCellCount * 4, options: .storageModePrivate)
+        }
+    }
+}
+
 public enum GPUPackerError: LocalizedError {
     case kernelNotFound(String)
     public var errorDescription: String? {
@@ -377,6 +473,64 @@ extension ComputeRasteriserPointCloud {
         packer.pack(positions: positions, colors: colors, count: count, into: self, commandBuffer: commandBuffer)
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
+    }
+
+    /// Pack several GPU-resident raw-point chunks into free pool slots in one
+    /// command buffer, **adding** them to the resident set (existing slots are
+    /// left untouched). Each chunk takes a contiguous slot run; chunks for which
+    /// no run is free are skipped (and reported via the short return count).
+    /// Synchronous: commits and waits, then syncs the CPU mirror.
+    ///
+    /// This is the per-frame streaming building block proven in Phase 1 — the
+    /// CPU `ChunkPacker` + ``addBatches`` replacement. Returns the first-slot of
+    /// each chunk that was placed, in input order (shorter than `chunks` if the
+    /// pool ran out of contiguous runs).
+    ///
+    /// - Parameters:
+    ///   - packer: a configured ``GPUPacker``.
+    ///   - queue: command queue to submit on.
+    ///   - chunks: `(positions, colors, count)` per chunk; buffers are
+    ///     `float3`/`float4` `.storageModeShared`, caller-owned.
+    /// - Parameter maxConcurrent: number of independent scratch sets to ring
+    ///   over so chunks in one command buffer can overlap on the GPU. Measured
+    ///   benefit is marginal (~6% at the sweet spot, regresses past 4) because a
+    ///   single ~140k-point pack already saturates the GPU's sort/LOD-grid
+    ///   bandwidth — and each extra set costs a ~tens-of-MB LOD grid. Defaults
+    ///   to `1` (shared scratch, no extra memory); raise only if profiling a
+    ///   specific workload shows overlap helps.
+    @discardableResult
+    public func addRawChunksGPU(
+        packer: GPUPacker,
+        queue: MTLCommandQueue,
+        chunks: [(positions: MTLBuffer, colors: MTLBuffer, count: Int)],
+        maxConcurrent: Int = 1
+    ) -> [Int] {
+        let ppb = capacity.pointsPerBatch
+        var placed: [(firstSlot: Int, numBatches: Int, count: Int, index: Int)] = []
+        for (i, c) in chunks.enumerated() where c.count > 0 {
+            let nb = max(1, (c.count + ppb - 1) / ppb)
+            guard let firstSlot = reserveContiguousSlots(nb) else { continue }
+            placed.append((firstSlot, nb, c.count, i))
+        }
+        guard !placed.isEmpty, let commandBuffer = queue.makeCommandBuffer() else { return [] }
+        commandBuffer.label = "GPUPacker.addRawChunksGPU"
+        // Ring over `maxConcurrent` scratch sets so chunks land in different
+        // scratch and can overlap on the GPU (instead of serialising on shared
+        // sort/LOD buffers). Each set costs ~one max-chunk's sort scratch + one
+        // dense LOD grid, so the ring is bounded.
+        let sets = max(1, min(maxConcurrent, placed.count))
+        for (n, p) in placed.enumerated() {
+            packer.packChunk(
+                positions: chunks[p.index].positions, colors: chunks[p.index].colors,
+                count: p.count, firstSlot: p.firstSlot, scratchIndex: n % sets,
+                into: self, commandBuffer: commandBuffer
+            )
+        }
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        for p in placed { finalizeGPUChunk(firstSlot: p.firstSlot, numBatches: p.numBatches, count: p.count) }
+        commitBatchUpdates()
+        return placed.map(\.firstSlot)
     }
 }
 #endif

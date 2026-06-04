@@ -17,6 +17,8 @@ struct PackParams {
     uint level;       // current LOD level being claimed
     float coarseVoxelDivisions;
     float lodVoxelScale; // 0.5^level
+    uint slotBase;    // pool slot index of this chunk's first batch (0 for the
+                      // wholesale pack); makes per-batch firstPoint absolute.
 };
 
 // RasterBatch — must match ComputeRasteriserTypes.h byte-for-byte (the
@@ -265,7 +267,10 @@ kernel void packBatchAABB(device const float3 *sortedPos [[buffer(0)]],
         rb.minX = sMin[0].x; rb.minY = sMin[0].y; rb.minZ = sMin[0].z;
         rb.maxX = sMax[0].x; rb.maxY = sMax[0].y; rb.maxZ = sMax[0].z;
         rb.numPoints = end - start;
-        rb.firstPoint = start;
+        // Absolute pool point index: the chunk's points are written at
+        // (slotBase + b) * pointsPerBatch (via the output-buffer offset), so the
+        // renderer's firstPoint must match. slotBase == 0 for the wholesale pack.
+        rb.firstPoint = (p.slotBase + b) * p.pointsPerBatch;
         rb.fileIndex = 0;
         rb.p3 = rb.p4 = rb.p5 = rb.p6 = rb.p7 = rb.p8 = 0;
         batches[b] = rb;

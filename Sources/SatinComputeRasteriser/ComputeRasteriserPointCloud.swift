@@ -303,6 +303,48 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         for slot in 0 ..< n { batchMirror[slot] = ptr[slot] }
     }
 
+    /// Reserve a **contiguous** run of `n` free slots for a GPU chunk pack,
+    /// returning the first slot index (or `nil` if no run of `n` free slots
+    /// exists). The slots are removed from the free list and marked `state = 1`
+    /// provisionally; the GPU pack overwrites them with real per-batch data and
+    /// ``finalizeGPUChunk(firstSlot:numBatches:count:)`` syncs the mirror.
+    ///
+    /// A chunk's points are written as one contiguous run (`firstSlot*ppb ...`),
+    /// so its batches must occupy adjacent slots — unlike ``addBatches`` which
+    /// places each batch independently.
+    internal func reserveContiguousSlots(_ n: Int) -> Int? {
+        guard n > 0, n <= capacity.maxResidentBatches else { return nil }
+        var s = 0
+        while s + n <= capacity.maxResidentBatches {
+            var k = 0
+            while k < n, batchMirror[s + k].state == 0 { k += 1 }
+            if k == n {
+                let reserved = Set(s ..< (s + n))
+                freeSlots.removeAll { reserved.contains($0) }
+                for slot in s ..< (s + n) { batchMirror[slot].state = 1 }
+                return s
+            }
+            s += k + 1 // slot s+k is occupied → next possible run starts past it
+        }
+        return nil
+    }
+
+    /// After a GPU chunk pack into `[firstSlot, firstSlot+numBatches)`, pull the
+    /// GPU-written `RasterBatch` structs into the CPU mirror and account the
+    /// points. Caller flushes (e.g. ``commitBatchUpdates()``) once per frame.
+    internal func finalizeGPUChunk(firstSlot: Int, numBatches: Int, count: Int) {
+        if let batchesBuffer {
+            let ptr = batchesBuffer.contents().bindMemory(
+                to: RasterBatch.self, capacity: capacity.maxResidentBatches
+            )
+            for slot in firstSlot ..< min(firstSlot + numBatches, capacity.maxResidentBatches) {
+                batchMirror[slot] = ptr[slot]
+            }
+        }
+        residentBatchCount += numBatches
+        pointCount += count
+    }
+
     /// Mark every slot empty without freeing GPU buffers. Cheap; subsequent
     /// `addBatches` reuses slot 0 first.
     public func clearAllBatches() {

@@ -204,3 +204,114 @@ Implementation files:
   one-kernel-per-pass, too rigid for this).
 - `Sources/SatinComputeRasteriser/Pipelines/GPUPacker/Shaders.metal`.
 - temp `Sources/PackBench` benchmark target (remove or gate before done).
+
+---
+
+# PLAN: GPU pack/quantize offload for COPC streaming (2026-06-04)
+
+## Goal & success criteria
+Move the per-node pack/quantize (Morton sort, per-batch 10/10/10 quantize, LOD
+voxel levels, colour pack) off the SwiftPDAL CPU worker threads onto the (idle,
+~1%-busy) GPU on Apple Silicon, exploiting unified memory (zero-copy handoff).
+
+Done when:
+- GPU pack is decode-identical to SwiftPDAL `ChunkPacker` (positions within 1
+  quant step, LOD levels per-level-count-identical) — proven by tests.
+- End-to-end streaming throughput improves (freeing pack from workers lets those
+  cores decode more; target: pack ~vanishes from the worker Time-Profiler).
+- Behind a flag, default OFF until validated; no visual regression.
+- Both packages versioned; rollback = flip the flag.
+
+## De-risk result (done, 2026-06-04)
+Per ~140k-pt node on M5 Max: CPU pack 14.9 ms vs GPU pack 3.5 ms with full
+synchronous dispatch (4.2x), 0.60 ms/node amortised over 10 nodes/dispatch
+(25x). Per-dispatch overhead ~2.9 ms — real but doesn't erase the win. GO.
+Bench: `Tests/SatinComputeRasteriserTests/GPUPackBenchTests.swift`.
+
+## Current boundary (what changes)
+SwiftPDAL `read_node` -> raw XYZ(f64)+RGB -> `ChunkPacker.pack` (CPU, worker
+thread) -> `StreamingPointCloudChunk{xyzLow/Med/High,colors,levels,batches}` ->
+Satin `StreamingAdapter.update` -> `cloud.addBatches(packed...)` -> copySlice
+memcpy into GPU slot buffers; `commitBatchUpdates()` once/frame.
+
+## Target architecture
+SwiftPDAL `read_node` -> raw XYZ -> emit RAW chunk{Float3 positions
+(origin-shifted), UInt32 RGBA8, count} (NO CPU pack) -> Satin collects all of a
+frame's `delta.added` raw chunks -> ONE command buffer: upload raw points to a
+per-frame staging arena + encode each chunk's pack stages into its assigned slot
+range -> commit ASYNC (no wait; slot visible next frame). Per-frame batching
+targets the ~0.60 ms/node amortised number; async commit removes the 2.9 ms sync
+from the render critical path entirely.
+
+## Component changes
+
+### A. Satin — slot-targeted per-chunk pack kernel (the core work)
+`GPUPacker` today does WHOLESALE pool replacement (prepareForGPUPack rewrites
+from slot 0, writes batches[0..]). Streaming needs packing into an arbitrary
+free slot range without disturbing residents. Refactor the GPUPacker stages to
+take (inPointOffset, count, firstSlot, ppb):
+  bounds(node-local) -> mortonKeys -> radix sort(sub-range) -> gather
+  pos+colour -> per-batch AABB(write batches[firstSlot..]) -> quantize(write
+  xyz* at firstSlot*ppb) -> LOD init/claim/assign(node-local grid).
+- Radix scratch: a per-frame arena sized to the frame's total added points;
+  each chunk sorts its sub-range. (Main impl risk: segmented/offset radix sort.)
+- New entry: `ComputeRasteriserPointCloud.addRawChunks([(positions,colors,count)],
+  packer:, commandBuffer:)` that assigns free slots, encodes pack per chunk,
+  fills batches, marks slots pending; commit handled by caller (one/frame).
+
+### B. SwiftPDAL — raw-points emission mode (opt-in)
+- New `StreamingOptions` flag (e.g. `emitRawPoints`) OR a parallel chunk type.
+- When set, skip `ChunkPacker.pack`; emit Float3 (origin-shifted) + RGBA8.
+  Keep the global rgbShift decision (per-file) on the SwiftPDAL side; emit final
+  RGBA8 so Satin only permutes colour in the gather stage.
+- Default OFF -> fully backward compatible -> minor bump 1.14.0.
+
+### C. StreamingAdapter — per-frame batched dispatch
+- When raw mode on: collect `delta.added` raw chunks, memcpy positions/colours
+  into the shared staging arena, call `addRawChunks(...)`, commit once/frame
+  (async). Eviction/removed path unchanged.
+
+## Key decisions
+- Boundary payload: Float3 (16B, GPUPacker stride) + RGBA8 (4B) = 20 B/pt vs 17
+  packed. Slightly more, but removes CPU pack; unified memory => no copy cost.
+- Async commit (no waitUntilCompleted on render thread) -> 1-frame slot latency,
+  acceptable for streaming, and removes the 2.9 ms sync from the hot path.
+- Per-frame batching (not per-node) -> amortises commit; matches adapter's
+  existing per-frame `delta.added` loop.
+
+## Correctness / parity strategy
+- Extend GPUPacker parity tests to slot-targeted + multi-chunk-in-one-cmdbuffer.
+- Add a cross-check vs SwiftPDAL `ChunkPacker` specifically (rgbShift global
+  logic, originShift, Morton tie-ordering) on a real node — the shipped CPU path
+  is the thing being replaced, not just Satin's fixture pack.
+
+## Versioning / migration / rollback
+- Flag-gated (StreamingOptions + renderer config). Default OFF. Rollback = off.
+- SwiftPDAL 1.14.0 (additive raw mode). Satin: additive addRawChunks + kernel.
+- App opts in via the flag once validated; flip default later.
+
+## Risks
+- Segmented/offset radix sort correctness (primary).
+- Parity drift vs ChunkPacker (rgbShift/originShift/ties).
+- Main-thread staging memcpy spikes when many nodes added in one frame (fast
+  camera moves). Mitigate: cap nodes packed/frame, spread across frames; LOG the
+  cap (no silent truncation).
+- Bounded upside: pack is ~16% of worker CPU; decode (lazperf) dominates. Real
+  systemic win = freed cores -> higher decode concurrency, not just pack removal.
+  Set expectations; this is moderate-EV with real complexity. (Cheaper "much
+  larger cloud" levers remain: decode-less via tighter LOD, bigger budget.)
+
+## Measurement wrinkle
+StreamingBench (SwiftPDAL, no Metal) CANNOT measure the GPU path. Need a
+Satin-side end-to-end harness OR instrument the example app: Mpts/s before/after,
+per-frame GPU pack time (Metal trace), worker-thread CPU (Time Profiler — pack
+should disappear from workers).
+
+## Phasing (each independently verifiable)
+0. De-risk — DONE.
+1. Satin: slot-targeted pack kernel + addRawChunks + parity tests (feed raw
+   points from a fixture; no SwiftPDAL change yet). Fully testable in Satin.
+2. SwiftPDAL: raw-points emission mode (flag) + version bump.
+3. Wire StreamingAdapter: raw path + per-frame batched async dispatch.
+4. End-to-end measure (Satin app/new harness) + parity on a real cloud + A/B.
+5. Flip default / document / version both packages.

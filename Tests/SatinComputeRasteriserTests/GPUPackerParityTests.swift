@@ -170,4 +170,111 @@ private func sharedBuffer<T>(_ device: MTLDevice, _ array: [T]) -> MTLBuffer {
         #expect(diff <= count / 1000, "level \(level): cpu=\(cpuHist[level]) gpu=\(gpuHist[level])")
     }
 }
+
+// MARK: - Slot-targeted (streaming) pack parity
+//
+// addRawChunksGPU packs each chunk into a contiguous run of pool slots without
+// disturbing existing residents — the Phase-1 streaming building block. For a
+// lattice (distinct Morton keys) the sort order is deterministic, so each GPU
+// batch contains exactly the CPU batch's points; we assert per-batch AABB
+// equality (tie-independent), absolute firstPoint, numPoints, and the LOD level
+// histogram — read at the chunk's slot offset in the pool.
+
+private func verifyChunkAtSlot(
+    _ cloud: ComputeRasteriserPointCloud, _ cpu: PackedPointCloud,
+    firstSlot: Int, ppb: Int, label: String
+) {
+    let count = cpu.xyzLow.count
+    let nb = cpu.batchCount
+    let poolBatches = cloud.batchCount
+    let gBatches = cloud.batchesBuffer!.contents().bindMemory(to: RasterBatch.self, capacity: poolBatches)
+    let gLevels = cloud.levelsBuffer!.contents().bindMemory(to: UInt8.self, capacity: poolBatches * ppb)
+    let base = firstSlot * ppb
+
+    for b in 0 ..< nb {
+        let c = cpu.batches[b]
+        let g = gBatches[firstSlot + b]
+        let cMin = SIMD3<Float>(c.minX, c.minY, c.minZ), cMax = SIMD3<Float>(c.maxX, c.maxY, c.maxZ)
+        let gMin = SIMD3<Float>(g.minX, g.minY, g.minZ), gMax = SIMD3<Float>(g.maxX, g.maxY, g.maxZ)
+        #expect(simd_distance(cMin, gMin) < 1e-5, "\(label) batch \(b) min: cpu \(cMin) gpu \(gMin)")
+        #expect(simd_distance(cMax, gMax) < 1e-5, "\(label) batch \(b) max: cpu \(cMax) gpu \(gMax)")
+        #expect(g.firstPoint == UInt32((firstSlot + b) * ppb), "\(label) batch \(b) firstPoint not absolute (\(g.firstPoint))")
+        #expect(g.numPoints == c.numPoints, "\(label) batch \(b) numPoints cpu=\(c.numPoints) gpu=\(g.numPoints)")
+        #expect(g.state == 1)
+    }
+
+    var cpuHist = [Int](repeating: 0, count: 8)
+    var gpuHist = [Int](repeating: 0, count: 8)
+    for i in 0 ..< count {
+        cpuHist[Int(cpu.levels[i]) & 7] += 1
+        gpuHist[Int(gLevels[base + i]) & 7] += 1
+    }
+    for level in 0 ..< 8 {
+        #expect(abs(cpuHist[level] - gpuHist[level]) <= count / 1000,
+                "\(label) level \(level): cpu=\(cpuHist[level]) gpu=\(gpuHist[level])")
+    }
+}
+
+@Test func gpuPackChunkSlotTargetedNonDestructive() throws {
+    let context = try makeContext()
+    let device = context.device
+    let queue = try #require(device.makeCommandQueue())
+    let packer = try GPUPacker(context: context)
+    let ppb = computeRasteriserThreadsPerGroup * 80
+
+    let (posA, colA) = lattice(40) // 64000 pts
+    let (posB, colB) = lattice(32) // 32768 pts
+    let cpuA = PackedPointCloudFixtures.pack(positions: posA, colors: colA)
+    let cpuB = PackedPointCloudFixtures.pack(positions: posB, colors: colB)
+
+    let cloud = ComputeRasteriserPointCloud(
+        context: context,
+        capacity: ComputeRasteriserCapacity(maxResidentBatches: cpuA.batchCount + cpuB.batchCount + 3, pointsPerBatch: ppb)
+    )
+
+    // First chunk -> slots [0, nbA).
+    let sA = cloud.addRawChunksGPU(packer: packer, queue: queue,
+                                   chunks: [(sharedBuffer(device, posA), sharedBuffer(device, colA), posA.count)])
+    #expect(sA == [0])
+    #expect(cloud.residentBatchCount == cpuA.batchCount)
+    #expect(cloud.pointCount == posA.count)
+    verifyChunkAtSlot(cloud, cpuA, firstSlot: 0, ppb: ppb, label: "A(after A)")
+
+    // Second chunk, separate dispatch -> slots [nbA, nbA+nbB). Must NOT disturb A.
+    let sB = cloud.addRawChunksGPU(packer: packer, queue: queue,
+                                   chunks: [(sharedBuffer(device, posB), sharedBuffer(device, colB), posB.count)])
+    #expect(sB == [cpuA.batchCount]) // non-zero firstSlot
+    #expect(cloud.residentBatchCount == cpuA.batchCount + cpuB.batchCount)
+    #expect(cloud.pointCount == posA.count + posB.count)
+    verifyChunkAtSlot(cloud, cpuB, firstSlot: cpuA.batchCount, ppb: ppb, label: "B")
+    verifyChunkAtSlot(cloud, cpuA, firstSlot: 0, ppb: ppb, label: "A(after B)") // undisturbed
+}
+
+@Test func gpuPackTwoChunksOneCommandBuffer() throws {
+    let context = try makeContext()
+    let device = context.device
+    let queue = try #require(device.makeCommandQueue())
+    let packer = try GPUPacker(context: context)
+    let ppb = computeRasteriserThreadsPerGroup * 80
+
+    let (posA, colA) = lattice(36) // 46656 pts
+    let (posB, colB) = lattice(28) // 21952 pts
+    let cpuA = PackedPointCloudFixtures.pack(positions: posA, colors: colA)
+    let cpuB = PackedPointCloudFixtures.pack(positions: posB, colors: colB)
+
+    let cloud = ComputeRasteriserPointCloud(
+        context: context,
+        capacity: ComputeRasteriserCapacity(maxResidentBatches: cpuA.batchCount + cpuB.batchCount + 1, pointsPerBatch: ppb)
+    )
+
+    // Both chunks in ONE addRawChunksGPU call (one command buffer, shared scratch).
+    let slots = cloud.addRawChunksGPU(packer: packer, queue: queue, chunks: [
+        (sharedBuffer(device, posA), sharedBuffer(device, colA), posA.count),
+        (sharedBuffer(device, posB), sharedBuffer(device, colB), posB.count),
+    ])
+    #expect(slots == [0, cpuA.batchCount])
+    #expect(cloud.residentBatchCount == cpuA.batchCount + cpuB.batchCount)
+    verifyChunkAtSlot(cloud, cpuA, firstSlot: 0, ppb: ppb, label: "A")
+    verifyChunkAtSlot(cloud, cpuB, firstSlot: cpuA.batchCount, ppb: ppb, label: "B")
+}
 #endif
