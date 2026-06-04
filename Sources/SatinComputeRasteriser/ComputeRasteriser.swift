@@ -22,6 +22,16 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private var pixelBuffer: MTLBuffer?
     private var nearestDepthBuffer: MTLBuffer?
     private var nearestIndexBuffer: MTLBuffer?
+
+    // A single zeroed buffer bound as the displacement/tint stand-in for clouds
+    // that have no real buffer, when `applyDisplacement`/`applyTint` is on.
+    // Without it, those clouds would bind `xyzLowBuffer` (packed positions) and
+    // read it as garbage offsets/colours — so a per-cloud pass on one cloud of a
+    // multi-cloud mosaic corrupts the others. Sized to the largest cloud's point
+    // capacity (reads for any cloud stay in-bounds); zeroed once on (re)alloc.
+    private var zeroStandInBuffer: MTLBuffer?
+    private var zeroStandInPoints: Int = 0
+    private var currentStandIn: MTLBuffer?
     private var viewport: SIMD4<Float> = .zero
     private var scaleFactor: Float = 1.0
 
@@ -237,6 +247,20 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         clearProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
         clearProcessor.update(commandBuffer)
 
+        // When displacement/tint is globally on, clouds without their own buffer
+        // must read zeros (not xyzLow garbage). Prepare a shared zeroed stand-in
+        // sized to the largest drawable cloud so every cloud's reads are in-bounds.
+        currentStandIn = nil
+        if configuration.applyDisplacement || configuration.applyTint {
+            let maxPoints = pointClouds
+                .filter { $0.visible && $0.residentBatchCount > 0 }
+                .map { $0.capacity.maxResidentPoints }
+                .max() ?? 0
+            if maxPoints > 0 {
+                currentStandIn = zeroStandIn(forPoints: maxPoints, commandBuffer: commandBuffer)
+            }
+        }
+
         // Depth and color are split into two passes ACROSS all clouds, not
         // interleaved per cloud. The color pass only commits a fragment whose
         // depth is within tolerance of the pixel's winning depth, and those
@@ -395,14 +419,36 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     /// validation — fall back to `xyzLowBuffer` when the user hasn't supplied a
     /// real displacement buffer; the shader gates reads on `applyDisplacement`.
     private func bindDisplacement(_ cloud: ComputeRasteriserPointCloud, to processor: DepthPassProcessor) {
-        processor.displacementBuffer = cloud.displacementBuffer ?? cloud.xyzLowBuffer
+        processor.displacementBuffer = cloud.displacementBuffer ?? currentStandIn ?? cloud.xyzLowBuffer
     }
 
     /// ColorPass reads tint at Custom10. Custom10 must always be bound for
     /// Metal validation — fall back to `xyzLowBuffer` when the user hasn't
     /// supplied a real tint buffer; the shader gates reads on `applyTint`.
     private func bindTint(_ cloud: ComputeRasteriserPointCloud, to processor: ColorPassProcessor) {
-        processor.tintBuffer = cloud.tintBuffer ?? cloud.xyzLowBuffer
+        processor.tintBuffer = cloud.tintBuffer ?? currentStandIn ?? cloud.xyzLowBuffer
+    }
+
+    /// A shared zeroed buffer covering `points` (16 B/point — fits both float3
+    /// displacement and float4 tint). Allocated + zeroed once, grown if a larger
+    /// cloud appears. Lets a per-cloud Displacement/Tint pass affect only its own
+    /// cloud; the rest read zeros instead of `xyzLow` garbage.
+    private func zeroStandIn(forPoints points: Int, commandBuffer: MTLCommandBuffer) -> MTLBuffer? {
+        if let buf = zeroStandInBuffer, zeroStandInPoints >= points { return buf }
+        let stride = MemoryLayout<SIMD4<Float>>.stride
+        let length = max(points, 1) * stride
+        guard let buf = context.device.makeBuffer(length: length, options: .storageModePrivate) else {
+            return zeroStandInBuffer
+        }
+        buf.label = "\(label).ZeroStandIn"
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.label = "\(label).ZeroStandInFill"
+            blit.fill(buffer: buf, range: 0 ..< length, value: 0)
+            blit.endEncoding()
+        }
+        zeroStandInBuffer = buf
+        zeroStandInPoints = max(points, 1)
+        return buf
     }
 
     private func resizeResources() {
