@@ -190,7 +190,20 @@ private func computeLODLevels(
     let longestAxis = max(extent.x, max(extent.y, extent.z))
     let baseVoxel = longestAxis / Float(coarseVoxelDivisions)
 
-    var occupied: Set<SIMD3<Int32>> = []
+    // Voxel-occupancy dedup keyed by a single UInt64 (21 bits/axis) rather than
+    // SIMD3<Int32> — hashing one integer is far cheaper than Swift's per-
+    // component Hasher combine. Cells are non-negative (positions >= boundsMin)
+    // and node-local, so the pack is collision-free over the values that occur.
+    // Matches SwiftPDAL ChunkPacker.computeLODLevels.
+    @inline(__always)
+    func cellKey(_ local: SIMD3<Float>) -> UInt64 {
+        let cx = UInt64(max(0, Int32(local.x.rounded(.down)))) & 0x1F_FFFF
+        let cy = UInt64(max(0, Int32(local.y.rounded(.down)))) & 0x1F_FFFF
+        let cz = UInt64(max(0, Int32(local.z.rounded(.down)))) & 0x1F_FFFF
+        return (cx << 42) | (cy << 21) | cz
+    }
+
+    var occupied = Set<UInt64>()
     for level in 0 ..< (lodLevels - 1) {
         let voxelSize = baseVoxel * powf(0.5, Float(level))
         let invVoxel = 1.0 / max(voxelSize, 0.000001)
@@ -198,8 +211,7 @@ private func computeLODLevels(
         for i in 0 ..< count {
             if levels[i] != maxLevel { continue }
             let local = (positions[i] - boundsMin) * invVoxel
-            let cell = SIMD3<Int32>(Int32(local.x.rounded(.down)), Int32(local.y.rounded(.down)), Int32(local.z.rounded(.down)))
-            if occupied.insert(cell).inserted {
+            if occupied.insert(cellKey(local)).inserted {
                 levels[i] = UInt8(level)
             }
         }
