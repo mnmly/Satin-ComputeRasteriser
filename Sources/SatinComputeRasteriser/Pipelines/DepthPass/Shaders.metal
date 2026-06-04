@@ -48,6 +48,9 @@ kernel void depthPassUpdate(
         float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
         if (uniforms.applyDisplacement != 0) {
             point += displacements[pointIndex];
+            // Cull sentinel: a NaN displacement drops the point from the depth
+            // pass too, so it neither occludes nor draws (geometry behind shows).
+            if (any(isnan(point))) { continue; }
         }
         float4 clip = file.transform * float4(point, 1.0);
         if (clip.w <= 0.0) {

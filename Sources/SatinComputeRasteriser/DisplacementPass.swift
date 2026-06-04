@@ -20,9 +20,13 @@ import Satin
 ///     localOffset)` — turns a `thread_position_in_grid` into a `(batch,
 ///     pointIndex)` pair, returning `false` for non-resident slots / batch
 ///     padding tails so the kernel can early-out.
-///   * `SCR_DISPLACEMENT_KERNEL_BUFFERS` macro — expands to the seven buffer
-///     declarations the pass binds automatically (slots 0–6). User uniforms
-///     bind at ``DisplacementPass/bufferUser0`` (slot 7) onward.
+///   * `SCR_DISPLACEMENT_KERNEL_BUFFERS` macro — expands to the buffer
+///     declarations the pass binds automatically (slots 0–7), including `colors`
+///     (the native packed-RGBA8 per-point colour). User uniforms bind at
+///     ``DisplacementPass/bufferUser0`` (slot 8) onward.
+///   * `scr_decodeColorAt(pointIndex, colors)` — the point's current colour as
+///     0..1 rgba. Write a NaN displacement to cull a point (DepthPass + ColorPass
+///     both skip a point whose displaced position is NaN — a true removal).
 ///   * `SCR_DISP_BUF_*` slot constants for kernel `[[buffer(...)]]` attrs.
 ///
 /// **Cloud targeting.** ``encode(commandBuffer:cloud:)`` defaults to the
@@ -42,14 +46,17 @@ public final class DisplacementPass {
     public static let bufferLevels: Int       = 4
     public static let bufferDisplacements: Int = 5
     public static let bufferInfo: Int         = 6
-    public static let bufferUser0: Int        = 7
-    public static let bufferUser1: Int        = 8
-    public static let bufferUser2: Int        = 9
-    public static let bufferUser3: Int        = 10
-    public static let bufferUser4: Int        = 11
-    public static let bufferUser5: Int        = 12
-    public static let bufferUser6: Int        = 13
-    public static let bufferUser7: Int        = 14
+    /// Native per-point colours (packed RGBA8), so a displacement kernel can read
+    /// each point's colour — e.g. to cull points (write a NaN displacement).
+    public static let bufferColors: Int       = 7
+    public static let bufferUser0: Int        = 8
+    public static let bufferUser1: Int        = 9
+    public static let bufferUser2: Int        = 10
+    public static let bufferUser3: Int        = 11
+    public static let bufferUser4: Int        = 12
+    public static let bufferUser5: Int        = 13
+    public static let bufferUser6: Int        = 14
+    public static let bufferUser7: Int        = 15
 
     /// Bind extra uniforms / buffers each frame. Called inside the compute
     /// encoder after the pass's own bindings, before dispatch. Bind to
@@ -122,6 +129,7 @@ public final class DisplacementPass {
               let xyzMed = target.xyzMedBuffer,
               let xyzHigh = target.xyzHighBuffer,
               let levels = target.levelsBuffer,
+              let colors = target.colorsBuffer,
               let info = infoBuffer
         else { return }
 
@@ -151,6 +159,7 @@ public final class DisplacementPass {
         encoder.setBuffer(levels,        offset: 0, index: Self.bufferLevels)
         encoder.setBuffer(out,           offset: 0, index: Self.bufferDisplacements)
         encoder.setBuffer(info,          offset: 0, index: Self.bufferInfo)
+        encoder.setBuffer(colors,        offset: 0, index: Self.bufferColors)
         bindUserBuffers?(encoder)
 
         let gridSize = target.capacity.maxResidentBatches * target.capacity.pointsPerBatch
@@ -216,14 +225,15 @@ public final class DisplacementPass {
     #define SCR_DISP_BUF_LEVELS    4
     #define SCR_DISP_BUF_OUT       5
     #define SCR_DISP_BUF_INFO      6
-    #define SCR_DISP_BUF_USER0     7
-    #define SCR_DISP_BUF_USER1     8
-    #define SCR_DISP_BUF_USER2     9
-    #define SCR_DISP_BUF_USER3     10
-    #define SCR_DISP_BUF_USER4     11
-    #define SCR_DISP_BUF_USER5     12
-    #define SCR_DISP_BUF_USER6     13
-    #define SCR_DISP_BUF_USER7     14
+    #define SCR_DISP_BUF_COLORS    7
+    #define SCR_DISP_BUF_USER0     8
+    #define SCR_DISP_BUF_USER1     9
+    #define SCR_DISP_BUF_USER2     10
+    #define SCR_DISP_BUF_USER3     11
+    #define SCR_DISP_BUF_USER4     12
+    #define SCR_DISP_BUF_USER5     13
+    #define SCR_DISP_BUF_USER6     14
+    #define SCR_DISP_BUF_USER7     15
 
     typedef struct {
         int  state;
@@ -283,6 +293,18 @@ public final class DisplacementPass {
         return float3(x, y, z) * (wgSize / SCR_STEPS_10BIT) + wgMin;
     }
 
+    // Decode a point's native colour (packed RGBA8, little-endian) to 0..1 rgba.
+    // Lets a displacement kernel branch on the point's current colour — e.g. to
+    // cull dark points by writing a NaN displacement (both DepthPass and ColorPass
+    // skip a point whose displaced position is NaN).
+    inline float4 scr_decodeColorAt(uint pointIndex, device const uint *colors) {
+        const uint c = colors[pointIndex];
+        return float4(float( c        & 0xffu),
+                      float((c >>  8) & 0xffu),
+                      float((c >> 16) & 0xffu),
+                      float((c >> 24) & 0xffu)) * (1.0 / 255.0);
+    }
+
     inline bool scr_resolveDisplacementThread(
         uint id,
         constant ScrDisplacementInfo &info,
@@ -306,7 +328,8 @@ public final class DisplacementPass {
         device const uint        *xyzHigh            [[buffer(SCR_DISP_BUF_XYZ_HIGH)]], \\
         device const uchar       *levels             [[buffer(SCR_DISP_BUF_LEVELS)]], \\
         device       float3      *displacements      [[buffer(SCR_DISP_BUF_OUT)]], \\
-        constant     ScrDisplacementInfo &_scrInfo   [[buffer(SCR_DISP_BUF_INFO)]]
+        constant     ScrDisplacementInfo &_scrInfo   [[buffer(SCR_DISP_BUF_INFO)]], \\
+        device const uint        *colors             [[buffer(SCR_DISP_BUF_COLORS)]]
 
     """
 }
