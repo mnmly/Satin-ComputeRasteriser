@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import Satin
 import SatinComputeRasteriser
 import SwiftPDAL
@@ -17,6 +18,12 @@ public final class StreamingAdapter {
     private let source: any StreamingPointCloudSource
     private let cloud: ComputeRasteriserPointCloud
     private var slotsByChunk: [ChunkID: [Int]] = [:]
+
+    // GPU-pack path (used only when the source emits raw chunks, i.e.
+    // StreamingOptions.emitRawPoints). Lazily built from the cloud's context so
+    // the packed path stays zero-cost.
+    private lazy var gpuPacker: GPUPacker? = try? GPUPacker(context: cloud.context)
+    private lazy var packQueue: MTLCommandQueue? = cloud.context.device.makeCommandQueue()
 
     /// Number of chunks currently resident in the slot pool.
     public private(set) var residentChunks: Int = 0
@@ -83,7 +90,30 @@ public final class StreamingAdapter {
             dirty = true
         }
 
+        // Raw chunks (StreamingOptions.emitRawPoints) carry un-packed points the
+        // GPU packs; everything else takes the CPU-packed addBatches path. A
+        // single source emits one or the other, but we branch per chunk so both
+        // are supported.
+        var rawInputs: [(positions: MTLBuffer, colors: MTLBuffer, count: Int)] = []
+        var rawMeta: [(id: ChunkID, count: Int)] = []
+        let device = cloud.context.device
+
         for chunk in delta.added {
+            if let rawPositions = chunk.rawPositions, let rawColors = chunk.rawColors {
+                let count = chunk.totalPointCount
+                guard
+                    let posBuf = rawPositions.withUnsafeBytes({ raw in
+                        device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+                    }),
+                    let colBuf = rawColors.withUnsafeBytes({ raw in
+                        device.makeBuffer(bytes: raw.baseAddress!, length: raw.count, options: .storageModeShared)
+                    })
+                else { continue }
+                rawInputs.append((posBuf, colBuf, count))
+                rawMeta.append((chunk.id, count))
+                continue
+            }
+
             let batches = chunk.batches.map(Self.toRasterBatch)
             guard cloud.freeSlotCount >= batches.count else {
                 lastError = "slot pool full (capacity \(cloud.batchCount)); raise budget or maxResidentBatches"
@@ -100,6 +130,24 @@ public final class StreamingAdapter {
             )
             slotsByChunk[chunk.id] = slots
             dirty = true
+        }
+
+        // Pack this frame's raw chunks in one GPU dispatch.
+        if !rawInputs.isEmpty, let packer = gpuPacker, let queue = packQueue {
+            let ppb = cloud.capacity.pointsPerBatch
+            let firstSlots = cloud.addRawChunksGPU(packer: packer, queue: queue, chunks: rawInputs)
+            for (i, meta) in rawMeta.enumerated() {
+                let firstSlot = firstSlots[i]
+                guard firstSlot >= 0 else {
+                    lastError = "slot pool full (capacity \(cloud.batchCount)); raise budget or maxResidentBatches"
+                    continue
+                }
+                let nb = max(1, (meta.count + ppb - 1) / ppb)
+                slotsByChunk[meta.id] = Array(firstSlot ..< (firstSlot + nb))
+            }
+            // addRawChunksGPU already flushed the batch mirror; no extra commit
+            // needed for the raw chunks, but a pending evict/packed change still
+            // needs the trailing flush below.
         }
 
         if dirty { cloud.commitBatchUpdates() }

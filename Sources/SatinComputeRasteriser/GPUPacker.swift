@@ -478,13 +478,14 @@ extension ComputeRasteriserPointCloud {
     /// Pack several GPU-resident raw-point chunks into free pool slots in one
     /// command buffer, **adding** them to the resident set (existing slots are
     /// left untouched). Each chunk takes a contiguous slot run; chunks for which
-    /// no run is free are skipped (and reported via the short return count).
-    /// Synchronous: commits and waits, then syncs the CPU mirror.
+    /// no run is free are skipped. Synchronous: commits and waits, then syncs
+    /// the CPU mirror.
     ///
     /// This is the per-frame streaming building block proven in Phase 1 — the
-    /// CPU `ChunkPacker` + ``addBatches`` replacement. Returns the first-slot of
-    /// each chunk that was placed, in input order (shorter than `chunks` if the
-    /// pool ran out of contiguous runs).
+    /// CPU `ChunkPacker` + ``addBatches`` replacement. Returns an **input-aligned**
+    /// array: `result[i]` is the first slot chunk `i` was packed into, or `-1`
+    /// if it couldn't be placed. The chunk's slots are
+    /// `[result[i], result[i] + ceil(count/pointsPerBatch))`.
     ///
     /// - Parameters:
     ///   - packer: a configured ``GPUPacker``.
@@ -512,7 +513,11 @@ extension ComputeRasteriserPointCloud {
             guard let firstSlot = reserveContiguousSlots(nb) else { continue }
             placed.append((firstSlot, nb, c.count, i))
         }
-        guard !placed.isEmpty, let commandBuffer = queue.makeCommandBuffer() else { return [] }
+        // Input-aligned result: result[i] is the first slot chunk i was packed
+        // into, or -1 if it couldn't be placed (no contiguous run). The caller
+        // reconstructs each chunk's slot range as [firstSlot, firstSlot+nb).
+        var result = [Int](repeating: -1, count: chunks.count)
+        guard !placed.isEmpty, let commandBuffer = queue.makeCommandBuffer() else { return result }
         commandBuffer.label = "GPUPacker.addRawChunksGPU"
         // Ring over `maxConcurrent` scratch sets so chunks land in different
         // scratch and can overlap on the GPU (instead of serialising on shared
@@ -528,9 +533,12 @@ extension ComputeRasteriserPointCloud {
         }
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
-        for p in placed { finalizeGPUChunk(firstSlot: p.firstSlot, numBatches: p.numBatches, count: p.count) }
+        for p in placed {
+            finalizeGPUChunk(firstSlot: p.firstSlot, numBatches: p.numBatches, count: p.count)
+            result[p.index] = p.firstSlot
+        }
         commitBatchUpdates()
-        return placed.map(\.firstSlot)
+        return result
     }
 }
 #endif
