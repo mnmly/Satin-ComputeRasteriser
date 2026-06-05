@@ -5,7 +5,10 @@ import Testing
 @Test func sharedTypeStridesMatchMetalExpectations() {
     #expect(ComputeRasteriserLayout.rasterBatchStride == 64)
     #expect(ComputeRasteriserLayout.rasterFileStride == 256)
-    #expect(ComputeRasteriserLayout.rasterPixelStride == 48)
+    // 32 since translucent-defocus (0.7.0): `weight` was carved from the old
+    // `SIMD3<UInt32> padding` (16-byte aligned → 48 B) into `weight + SIMD2`
+    // (8-byte aligned → 32 B). Swift + Metal share the field types, so both shrank.
+    #expect(ComputeRasteriserLayout.rasterPixelStride == 32)
     #expect(ComputeRasteriserLayout.visibleBatchStride == 16)
     #expect(MemoryLayout<UInt64>.stride == 8)
 }
