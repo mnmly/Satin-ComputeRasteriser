@@ -43,6 +43,20 @@ public final class ComputeRasteriserAppState: ObservableObject {
     @Published public var isStreaming: Bool = false
     @Published public var streamingResidency: StreamingResidencyChoice = .halo
 
+    // Depth of field (weighted-blended-OIT translucent defocus + jitter spread).
+    // The focus band is a FRACTION of the focal distance, so it auto-scales to
+    // whatever cloud is loaded. See ComputeRasteriserConfiguration.tintAlphaIsCoverage.
+    @Published public var dofEnabled: Bool = false
+    @Published public var dofTranslucent: Bool = true   // see-through defocus (OIT)
+    @Published public var dofJitter: Bool = true         // scatter spread (displacement)
+    @Published public var dofAutoFocus: Bool = true      // focus on the cloud centre
+    @Published public var dofFocus: Float = 1.0          // manual focal distance (world units)
+    @Published public var dofBand: Float = 0.04          // sharp half-band (fraction of focal dist)
+    @Published public var dofFalloff: Float = 0.25       // ramp to full effect (fraction)
+    @Published public var dofScatter: Float = 0.05       // jitter spread (fraction)
+    @Published public var dofMaxDefocus: Float = 0.85    // transparency cap (1 = can vanish)
+    @Published public var dofFocusMax: Float = 10        // manual-focus slider upper bound
+
     public init() {}
 }
 
@@ -71,6 +85,25 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
     public private(set) var cameraController: PerspectiveCameraController?
     public let appState: ComputeRasteriserAppState
     private let initialPLYURL: URL?
+
+    // Depth-of-field passes (created in setup from embedded kernels).
+    private var displacementPass: DisplacementPass?
+    private var tintPass: TintPass?
+    private var cloudCenter: SIMD3<Float> = .zero
+
+    // Byte-compatible with the embedded .metal `CameraUniforms` / `DofParams`.
+    private struct DofCameraUniforms {
+        var modelView: simd_float4x4 = matrix_identity_float4x4
+        var near: Float = 0.01
+        var far: Float = 100
+        var focalDistance: Float = 1
+    }
+    private struct DofParams {
+        var band: Float = 0.04
+        var falloff: Float = 0.25
+        var scatter: Float = 0.05
+        var maxDefocus: Float = 0.85
+    }
 
     public init(
         initialPLYURL: URL? = nil,
@@ -110,6 +143,8 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
         cameraController?.defaultDistance = 2.4
         cameraController?.enable()
 
+        makeDofPasses()
+
         if let initialPLYURL {
             loadPLY(url: initialPLYURL)
         }
@@ -135,6 +170,7 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
     }
 
     open override func draw(renderPassDescriptor: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer) {
+        encodeDof(commandBuffer: commandBuffer)
         renderer.draw(
             renderPassDescriptor: renderPassDescriptor,
             commandBuffer: commandBuffer,
@@ -371,6 +407,14 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
         let distance = radius / max(tan(camera.fov * 0.5 * .pi / 180.0), 0.001)
         let position = center + SIMD3<Float>(0.0, 0.0, distance * 1.35)
 
+        // DoF: focus on the cloud centre by default, size the manual slider to fit.
+        cloudCenter = center
+        let camDist = simd_length(position - center)
+        DispatchQueue.main.async { [appState] in
+            appState.dofFocus = camDist
+            appState.dofFocusMax = max(camDist * 3, radius * 6)
+        }
+
         cameraController?.disable()
         camera.position = position
         camera.near = max(distance - radius * 3.0, 0.001)
@@ -381,4 +425,133 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
         cameraController?.defaultOrientation = camera.orientation
         cameraController?.enable()
     }
+}
+
+// MARK: - Depth of field
+
+extension ComputeRasteriserAppRenderer {
+    /// Build the DoF passes from the embedded kernels. The displacement pass
+    /// scatters out-of-focus points; the tint pass (in coverage / weighted-blended
+    /// OIT mode) makes them see-through so they blend instead of hard-occluding.
+    func makeDofPasses() {
+        guard let jURL = writeTempKernel(Self.dofJitterKernel, name: "DofJitter"),
+              let tURL = writeTempKernel(Self.dofTranslucencyKernel, name: "DofTranslucency") else { return }
+        let dp = DisplacementPass(rasteriser: rasteriser, kernelURL: jURL, live: false)
+        dp.bindUserBuffers = { [weak self] enc in self?.bindDof(enc, user0: DisplacementPass.bufferUser0) }
+        displacementPass = dp
+        let tp = TintPass(rasteriser: rasteriser, kernelURL: tURL, live: false)
+        tp.alphaIsCoverage = true   // translucent defocus (OIT), not a colour mix
+        tp.bindUserBuffers = { [weak self] enc in self?.bindDof(enc, user0: TintPass.bufferUser0) }
+        tintPass = tp
+    }
+
+    /// Encode the DoF passes before the rasteriser draws (so the colour pass sees
+    /// this frame's displacement + tint). Disables a pass when its toggle is off.
+    func encodeDof(commandBuffer: MTLCommandBuffer) {
+        guard appState.dofEnabled else {
+            displacementPass?.disable(); tintPass?.disable(); return
+        }
+        if appState.dofJitter { displacementPass?.encode(commandBuffer: commandBuffer, cloud: pointCloud) }
+        else { displacementPass?.disable() }
+        if appState.dofTranslucent { tintPass?.encode(commandBuffer: commandBuffer, cloud: pointCloud) }
+        else { tintPass?.disable() }
+    }
+
+    /// Bind USER0 = per-cloud camera (modelView + focal distance), USER1 = the DoF
+    /// params, for whichever pass is encoding. The focus band is a fraction of the
+    /// focal distance, so it auto-scales to the loaded cloud.
+    private func bindDof(_ enc: MTLComputeCommandEncoder, user0: Int) {
+        let fileWorld = pointCloud.files.first?.world ?? matrix_identity_float4x4
+        let world = pointCloud.worldMatrix * fileWorld
+        let focus = appState.dofAutoFocus ? simd_length(camera.worldPosition - cloudCenter) : appState.dofFocus
+        var cam = DofCameraUniforms(
+            modelView: camera.viewMatrix * world,
+            near: camera.near, far: camera.far, focalDistance: max(focus, 1e-3)
+        )
+        withUnsafeBytes(of: &cam) { enc.setBytes($0.baseAddress!, length: $0.count, index: user0) }
+        var dof = DofParams(
+            band: appState.dofBand, falloff: appState.dofFalloff,
+            scatter: appState.dofJitter ? appState.dofScatter : 0,
+            maxDefocus: appState.dofTranslucent ? appState.dofMaxDefocus : 0
+        )
+        withUnsafeBytes(of: &dof) { enc.setBytes($0.baseAddress!, length: $0.count, index: user0 + 1) }
+    }
+
+    private func writeTempKernel(_ source: String, name: String) -> URL? {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).metal")
+        do {
+            try source.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            DispatchQueue.main.async { [appState] in
+                appState.errorMessage = "DoF kernel write failed: \(error.localizedDescription)"
+            }
+            return nil
+        }
+    }
+
+    // USER0 = camera, USER1 = DoF params. SCR prepends its preamble before compile.
+    private static let dofStructs = """
+    typedef struct {
+        float4x4 modelView;     // camera.view · cloud.world  (decoded-local → view)
+        float    near;
+        float    far;
+        float    focalDistance; // sharp distance from the camera (view-space units)
+    } CameraUniforms;
+    typedef struct {
+        float band;       // sharp half-band, fraction of focal distance
+        float falloff;    // ramp to full effect, fraction of focal distance
+        float scatter;    // jitter spread, fraction of focal distance
+        float maxDefocus; // transparency cap (1 = can fully vanish)
+    } DofParams;
+    inline float dofHash1(uint x) {
+        x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+        return float(x) * (1.0 / 4294967296.0);
+    }
+    inline float3 dofHash3(uint i, uint salt) {
+        return float3(dofHash1(i * 747796405u  + salt),
+                      dofHash1(i * 2891336453u + salt + 17u),
+                      dofHash1(i * 3266489917u + salt + 101u)) * 2.0 - 1.0;
+    }
+    """
+
+    static let dofJitterKernel = dofStructs + """
+
+    kernel void computeDisplacement(
+        SCR_DISPLACEMENT_KERNEL_BUFFERS,
+        constant CameraUniforms &cam [[buffer(SCR_DISP_BUF_USER0)]],
+        constant DofParams      &dof [[buffer(SCR_DISP_BUF_USER1)]],
+        uint id [[thread_position_in_grid]])
+    {
+        RasterBatch batch; uint pointIndex, localOffset;
+        if (!scr_resolveDisplacementThread(id, _scrInfo, batches, batch, pointIndex, localOffset)) return;
+        const float3 p = scr_decodePointAt(pointIndex, batch, xyzLow, xyzMed, xyzHigh, levels);
+        const float viewDepth = -(cam.modelView * float4(p, 1.0)).z;
+        const float band    = cam.focalDistance * dof.band;
+        const float falloff = max(cam.focalDistance * dof.falloff, 1e-3);
+        const float coc = saturate((abs(viewDepth - cam.focalDistance) - band) / falloff);
+        const float3 dir = dofHash3(pointIndex, 0u);
+        displacements[pointIndex] = dir * (coc * coc * cam.focalDistance * dof.scatter);
+    }
+    """
+
+    static let dofTranslucencyKernel = dofStructs + """
+
+    kernel void computeTint(
+        SCR_TINT_KERNEL_BUFFERS,
+        constant CameraUniforms &cam [[buffer(SCR_TINT_BUF_USER0)]],
+        constant DofParams      &dof [[buffer(SCR_TINT_BUF_USER1)]],
+        uint id [[thread_position_in_grid]])
+    {
+        RasterBatch batch; uint pointIndex, localOffset;
+        if (!scr_resolveTintThread(id, _scrInfo, batches, batch, pointIndex, localOffset)) return;
+        const float3 p = scr_decodePointAt(pointIndex, batch, xyzLow, xyzMed, xyzHigh, levels);
+        const float viewDepth = -(cam.modelView * float4(p, 1.0)).z;
+        const float band    = cam.focalDistance * dof.band;
+        const float falloff = max(cam.focalDistance * dof.falloff, 1e-3);
+        const float coc = saturate((abs(viewDepth - cam.focalDistance) - band) / falloff);
+        // alpha = coc → rasteriser composites with coverage = 1 - coc (translucent).
+        tints[pointIndex] = float4(0.0, 0.0, 0.0, coc * saturate(dof.maxDefocus));
+    }
+    """
 }

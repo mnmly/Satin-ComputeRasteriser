@@ -221,6 +221,37 @@ private struct SettingsSheet: View {
                     )
                 }
 
+                // Depth of field — translucent defocus (weighted-blended OIT) plus a
+                // jitter spread. Out-of-focus points become see-through and scatter,
+                // so they blend instead of hard-occluding. The band/falloff are
+                // fractions of the focal distance (auto-scales to any cloud).
+                Section("Depth of field") {
+                    Toggle("Enable", isOn: $appState.dofEnabled)
+                    if appState.dofEnabled {
+                        Toggle("Translucent (OIT)", isOn: $appState.dofTranslucent)
+                        Toggle("Jitter spread", isOn: $appState.dofJitter)
+                        Toggle("Auto focus (cloud centre)", isOn: $appState.dofAutoFocus)
+                        if !appState.dofAutoFocus {
+                            sliderRow(
+                                title: "Focus",
+                                value: floatBinding(\.dofFocus),
+                                range: 0 ... Double(max(appState.dofFocusMax, 0.01)),
+                                formatter: { String(format: "%.2f", $0) }
+                            )
+                        }
+                        sliderRow(title: "Band", value: floatBinding(\.dofBand),
+                                  range: 0 ... 0.5, formatter: { String(format: "%.3f", $0) })
+                        sliderRow(title: "Falloff", value: floatBinding(\.dofFalloff),
+                                  range: 0.01 ... 1.0, formatter: { String(format: "%.3f", $0) })
+                        sliderRow(title: "Scatter", value: floatBinding(\.dofScatter),
+                                  range: 0 ... 0.4, formatter: { String(format: "%.3f", $0) })
+                            .disabled(!appState.dofJitter)
+                        sliderRow(title: "Max defocus", value: floatBinding(\.dofMaxDefocus),
+                                  range: 0 ... 1.0, formatter: { String(format: "%.2f", $0) })
+                            .disabled(!appState.dofTranslucent)
+                    }
+                }
+
                 #if canImport(SwiftPDAL)
                 if appState.isStreaming {
                     Section("Streaming") {
@@ -260,6 +291,14 @@ private struct SettingsSheet: View {
                 }
             }
         }
+    }
+
+    /// Bridge a `Float` app-state property to the `Binding<Double>` the sliders use.
+    private func floatBinding(_ keyPath: ReferenceWritableKeyPath<ComputeRasteriserAppState, Float>) -> Binding<Double> {
+        Binding(
+            get: { Double(appState[keyPath: keyPath]) },
+            set: { appState[keyPath: keyPath] = Float($0) }
+        )
     }
 
     @ViewBuilder
