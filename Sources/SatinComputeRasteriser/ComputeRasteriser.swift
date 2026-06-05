@@ -193,6 +193,17 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         colorProcessor.applyDisplacement = configuration.applyDisplacement
         colorProcessor.applyTint = configuration.applyTint
 
+        // Translucent defocus (weighted-blended OIT). All three passes must agree:
+        // the depth pass stops defocused points claiming depth, the colour pass
+        // weighted-blends every point with no depth test, and the resolve composites
+        // Σ(c·α)/Σα with alpha 1−e^(−Σα). See ComputeRasteriserConfiguration.
+        // tintAlphaIsCoverage for the mechanism + the overdraw-scaling perf cost.
+        let coverage = configuration.applyTint && configuration.tintAlphaIsCoverage
+        depthProcessor.applyTint = configuration.applyTint
+        depthProcessor.tintAlphaIsCoverage = configuration.tintAlphaIsCoverage
+        colorProcessor.tintAlphaIsCoverage = configuration.tintAlphaIsCoverage
+        resolveProcessor.coverageEnabled = coverage
+
         colorProcessor.depthTolerance = configuration.depthTolerance
         colorProcessor.colorizeChunks = configuration.colorizeChunks
         colorProcessor.colorizeOverdraw = configuration.colorizeOverdraw
@@ -285,6 +296,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
 
             bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
             bindDisplacement(cloud, to: depthProcessor)
+            bindTint(cloud, to: depthProcessor)
             depthProcessor.update(commandBuffer)
 
             culledClouds.append(cloud)
@@ -424,10 +436,11 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         processor.displacementBuffer = cloud.displacementBuffer ?? currentStandIn ?? cloud.xyzLowBuffer
     }
 
-    /// ColorPass reads tint at Custom10. Custom10 must always be bound for
-    /// Metal validation — fall back to `xyzLowBuffer` when the user hasn't
-    /// supplied a real tint buffer; the shader gates reads on `applyTint`.
-    private func bindTint(_ cloud: ComputeRasteriserPointCloud, to processor: ColorPassProcessor) {
+    /// Depth + Color passes both read tint at Custom10. Custom10 must always be
+    /// bound for Metal validation — fall back to `xyzLowBuffer` when the user
+    /// hasn't supplied a real tint buffer; the shaders gate reads on `applyTint`.
+    /// Takes `DepthPassProcessor` so it serves both the depth and colour passes.
+    private func bindTint(_ cloud: ComputeRasteriserPointCloud, to processor: DepthPassProcessor) {
         processor.tintBuffer = cloud.tintBuffer ?? currentStandIn ?? cloud.xyzLowBuffer
     }
 

@@ -18,5 +18,6 @@ kernel void clearUpdate(
     pixels[gid].green = 0u;
     pixels[gid].blue = 0u;
     pixels[gid].count = 0u;
-    pixels[gid].padding = uint3(0);
+    pixels[gid].weight = 0u;
+    pixels[gid].padding = uint2(0);
 }

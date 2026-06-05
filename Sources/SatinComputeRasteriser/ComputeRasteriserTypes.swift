@@ -50,6 +50,27 @@ public struct ComputeRasteriserConfiguration: Sendable {
     /// `.highQualityAverage` mode for now.
     public var applyTint: Bool
 
+    /// Translucent-defocus mode (weighted-blended order-independent transparency).
+    ///
+    /// If true (with ``applyTint``), the per-point tint alpha is read as a
+    /// circle-of-confusion (0 = in focus, 1 = fully defocused) rather than a
+    /// colour-mix weight: defocused points keep their native colour but skip the
+    /// depth write and accumulate **coverage-weighted** with NO binary depth test,
+    /// so focus→defocus is a smooth blend (no hard occlusion edge) and the sharp
+    /// points behind a blurred one show through. A point with no tint pass reads
+    /// the zeroed stand-in (alpha 0 → fully opaque), so non-defocused clouds are
+    /// unaffected. Resolve: colour = Σ(c·α)/Σα, alpha = 1 − e^(−Σα). Only honored
+    /// in `.highQualityAverage` mode. Opt in per-pass via ``TintPass/alphaIsCoverage``.
+    ///
+    /// **Performance:** dropping the front-surface depth-test early-out means the
+    /// colour pass accumulates EVERY point along each ray (all depth layers), not
+    /// just the visible surface — cost scales with view-dependent **overdraw** and
+    /// is dominated by atomic contention on the pixel buffer. Cheap on thin/flat
+    /// clouds, several× heavier on dense/deep ones; throttle with the streaming LOD
+    /// budget and point size. (A screen-space post-process DoF would instead be
+    /// O(pixels), independent of overdraw.)
+    public var tintAlphaIsCoverage: Bool
+
     /// If true, the final composite writes the cloud's per-pixel reversed-Z
     /// depth into the render pass's depth attachment and depth-tests against it
     /// (`.greaterEqual`). This lets regular Satin meshes (e.g. a selection
@@ -75,6 +96,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         pointSizeScale: Float = 1.0,
         applyDisplacement: Bool = false,
         applyTint: Bool = false,
+        tintAlphaIsCoverage: Bool = false,
         writesSceneDepth: Bool = true
     ) {
         self.mode = mode
@@ -93,6 +115,7 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.pointSizeScale = pointSizeScale
         self.applyDisplacement = applyDisplacement
         self.applyTint = applyTint
+        self.tintAlphaIsCoverage = tintAlphaIsCoverage
         self.writesSceneDepth = writesSceneDepth
     }
 }
@@ -166,14 +189,18 @@ public struct RasterPixel: Sendable {
     public var green: UInt32
     public var blue: UInt32
     public var count: UInt32
-    public var padding: SIMD3<UInt32>
+    /// Σ(coverage·255) accumulated when translucent-defocus is on; 0 otherwise.
+    /// Carved from the former 3-word padding, so the stride is unchanged.
+    public var weight: UInt32
+    public var padding: SIMD2<UInt32>
 
-    public init(depth: UInt32 = 0, red: UInt32 = 0, green: UInt32 = 0, blue: UInt32 = 0, count: UInt32 = 0) {
+    public init(depth: UInt32 = 0, red: UInt32 = 0, green: UInt32 = 0, blue: UInt32 = 0, count: UInt32 = 0, weight: UInt32 = 0) {
         self.depth = depth
         self.red = red
         self.green = green
         self.blue = blue
         self.count = count
+        self.weight = weight
         self.padding = .zero
     }
 }

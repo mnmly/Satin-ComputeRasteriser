@@ -15,6 +15,12 @@ open class ResolveProcessor: BaseComputeRasteriserProcessor {
         didSet { set("backgroundColor", backgroundColor) }
     }
 
+    /// Resolve the translucent-defocus accumulation: coverage-weighted colour +
+    /// coverage as the pixel alpha. Mirrors `ColorPassProcessor.tintAlphaIsCoverage`.
+    public var coverageEnabled: Bool = false {
+        didSet { set("coverageEnabled", coverageEnabled ? 1 : 0) }
+    }
+
     public var pixelBuffer: MTLBuffer? { didSet { set(pixelBuffer, index: .Custom0) } }
     public var outputTexture: MTLTexture? { didSet { set(outputTexture, index: .Custom0) } }
     /// Per-pixel reversed-Z NDC depth (R32Float; 0 = no cloud). Written
@@ -25,6 +31,7 @@ open class ResolveProcessor: BaseComputeRasteriserProcessor {
         super.setup()
         set("screenSize", simd_int2(Int32(width), Int32(height)))
         set("backgroundColor", backgroundColor)
+        set("coverageEnabled", coverageEnabled ? 1 : 0)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {

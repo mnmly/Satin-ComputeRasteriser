@@ -1,5 +1,12 @@
 #include "../Common.metal"
 
+// ⚠️ Do NOT put `//` comments INSIDE these uniform structs. Satin's
+// compute-uniform parser silently drops the field that follows an inline
+// comment, so its `set("name", …)` becomes a no-op and the value never reaches
+// the shader. Document fields ABOVE the struct (here), keep the body bare.
+//
+// `tintAlphaIsCoverage` (with `applyTint`): switches this pass into translucent
+// defocus — weighted-blended OIT. See the accumulation block in colorPassUpdate.
 struct ColorPassUniforms {
     int2 screenSize;
     float4x4 viewMatrix;
@@ -14,6 +21,7 @@ struct ColorPassUniforms {
     int lodDither;
     int applyDisplacement;
     int applyTint;
+    int tintAlphaIsCoverage;
 };
 
 kernel void colorPassUpdate(
@@ -87,6 +95,8 @@ kernel void colorPassUpdate(
         uint g = (color >> 8) & 0xffu;
         uint b = (color >> 16) & 0xffu;
 
+        const bool coverageMode = (uniforms.applyTint != 0 && uniforms.tintAlphaIsCoverage != 0);
+        float coverage = 1.0;
         if (uniforms.applyTint != 0) {
             const float4 tint = tints[pointIndex];
             // Discard sentinel: a negative tint alpha drops this point entirely
@@ -94,13 +104,43 @@ kernel void colorPassUpdate(
             // discarded points resolves to count==0 → background alpha 0, i.e.
             // the point becomes fully transparent.
             if (tint.a < 0.0) { continue; }
-            const float w = saturate(tint.a);
-            const float3 orig = float3(float(r), float(g), float(b)) * (1.0 / 255.0);
-            const float3 mixed = mix(orig, saturate(tint.rgb), w);
-            r = uint(saturate(mixed.x) * 255.0 + 0.5);
-            g = uint(saturate(mixed.y) * 255.0 + 0.5);
-            b = uint(saturate(mixed.z) * 255.0 + 0.5);
+            if (coverageMode) {
+                // Translucent defocus: keep native colour, fade opacity by the
+                // circle-of-confusion. A point with no tint pass reads the zeroed
+                // stand-in (a = 0) → coverage 1 → fully opaque.
+                coverage = saturate(1.0 - tint.a);
+            } else {
+                const float w = saturate(tint.a);
+                const float3 orig = float3(float(r), float(g), float(b)) * (1.0 / 255.0);
+                const float3 mixed = mix(orig, saturate(tint.rgb), w);
+                r = uint(saturate(mixed.x) * 255.0 + 0.5);
+                g = uint(saturate(mixed.y) * 255.0 + 0.5);
+                b = uint(saturate(mixed.z) * 255.0 + 0.5);
+            }
         }
+        // Per-point accumulation.
+        //  Coverage (translucent-defocus) mode → weighted-blended OIT: accumulate
+        //  Σ(colour·α) and Σα with NO depth test, so focus→defocus is a true blend
+        //  with no hard occlusion edge. (Stored fixed-point — see below.)
+        //  Otherwise → the original uint colour sum + count, depth-tested.
+        //
+        //  PERF: coverage mode drops the front-surface early-out, so EVERY point in
+        //  EVERY footprint pixel issues these atomic adds — cost scales with
+        //  view-dependent OVERDRAW (all depth layers along the ray), not just the
+        //  visible surface. On dense/deep clouds that is several× more atomic
+        //  traffic, and the dominant cost is atomic CONTENTION on the pixel buffer
+        //  (same addresses hammered). Tune via the streaming LOD budget + point
+        //  size; opaque mode keeps the depth-tested early-out below. A screen-space
+        //  post-process DoF would instead be O(pixels), independent of overdraw.
+        const float a = coverage;                 // 1 = opaque (in focus), → 0 = defocused
+        if (coverageMode && a <= 0.0) { continue; } // fully transparent → contributes nothing
+        // Fixed-point + uint atomics (float atomics are a silent no-op on this path):
+        //   red/green/blue ← Σ(colour·α·S)   count ← Σ(α·S),  S = 4096.
+        const float kS = 4096.0;
+        const uint caR = uint(float(r) * (1.0 / 255.0) * a * kS + 0.5);
+        const uint caG = uint(float(g) * (1.0 / 255.0) * a * kS + 0.5);
+        const uint caB = uint(float(b) * (1.0 / 255.0) * a * kS + 0.5);
+        const uint caA = uint(a * kS + 0.5);
         const int radius = pointFootprintRadius(
             point, file,
             uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
@@ -121,11 +161,19 @@ kernel void colorPassUpdate(
                 }
 
                 const uint pixelIndex = uint(target.y * uniforms.screenSize.x + target.x);
+
+                if (coverageMode) {
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red,   caR, memory_order_relaxed);
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, caG, memory_order_relaxed);
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue,  caB, memory_order_relaxed);
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, caA, memory_order_relaxed);
+                    continue;
+                }
+
                 const uint closestDepthUint = pixels[pixelIndex].depth;
                 if (closestDepthUint == 0u) {
                     continue;
                 }
-
                 const float closestDepth = uintToDepthReverseZ(closestDepthUint);
                 const bool visible = ndc.z >= closestDepth * (1.0 - uniforms.depthTolerance);
                 if (!visible) {

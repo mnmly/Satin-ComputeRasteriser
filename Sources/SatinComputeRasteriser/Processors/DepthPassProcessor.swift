@@ -39,6 +39,17 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         didSet { set("applyDisplacement", applyDisplacement ? 1 : 0) }
     }
 
+    public var applyTint: Bool = false {
+        didSet { set("applyTint", applyTint ? 1 : 0) }
+    }
+
+    /// When set (with ``applyTint``), the tint's alpha is read as a
+    /// circle-of-confusion: defocused points skip the depth write so they don't
+    /// occlude the sharp points behind them (translucent defocus).
+    public var tintAlphaIsCoverage: Bool = false {
+        didSet { set("tintAlphaIsCoverage", tintAlphaIsCoverage ? 1 : 0) }
+    }
+
     public var batchesBuffer: MTLBuffer? { didSet { set(batchesBuffer, index: .Custom0) } }
     public var xyzLowBuffer: MTLBuffer? { didSet { set(xyzLowBuffer, index: .Custom1) } }
     public var xyzMedBuffer: MTLBuffer? { didSet { set(xyzMedBuffer, index: .Custom2) } }
@@ -61,6 +72,11 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
     /// Must be set (to either a real buffer or `xyzLowBuffer` as a stand-in)
     /// for Metal validation even when `applyDisplacement` is false.
     public var displacementBuffer: MTLBuffer? { didSet { set(displacementBuffer, index: .Custom8) } }
+    /// Per-point `float4` tint, indexed by pack-order `pointIndex`. Only read when
+    /// ``tintAlphaIsCoverage`` is on (for the depth-skip). Bound at Custom10 — the
+    /// same index the colour pass uses — so ``ColorPassProcessor`` inherits it.
+    /// Must be bound (real buffer or stand-in) for Metal validation.
+    public var tintBuffer: MTLBuffer? { didSet { set(tintBuffer, index: .Custom10) } }
 
     public var indirectArgsBuffer: MTLBuffer?
     public var indirectArgsBufferOffset: Int = 0
@@ -76,6 +92,8 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         set("pointSizeScale", pointSizeScale)
         set("lodDither", lodDither ? 1 : 0)
         set("applyDisplacement", applyDisplacement ? 1 : 0)
+        set("applyTint", applyTint ? 1 : 0)
+        set("tintAlphaIsCoverage", tintAlphaIsCoverage ? 1 : 0)
     }
 
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
@@ -88,6 +106,7 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
                 && levelsBuffer != nil
                 && visibleBatchesBuffer != nil
                 && displacementBuffer != nil
+                && tintBuffer != nil
                 && indirectArgsBuffer != nil
         )
     }

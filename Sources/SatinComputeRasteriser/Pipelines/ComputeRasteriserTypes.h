@@ -40,7 +40,8 @@ typedef struct {
     uint green;
     uint blue;
     uint count;
-    uint3 padding;
+    uint weight;   // Σ(coverage·255) for translucent-defocus accumulation (else 0)
+    uint2 padding;
 } RasterPixel;
 
 typedef struct {

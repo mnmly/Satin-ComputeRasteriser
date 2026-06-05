@@ -1,5 +1,9 @@
 #include "../Common.metal"
 
+// ⚠️ No inline `//` comments INSIDE this struct — Satin's uniform parser drops
+// the field after a comment (set() silently no-ops). Document fields above it.
+// `tintAlphaIsCoverage` (with `applyTint`): translucent-defocus mode — defocused
+// points skip the depth write (see depthPassUpdate) so they don't occlude.
 struct DepthPassUniforms {
     int2 screenSize;
     float4x4 viewMatrix;
@@ -10,6 +14,8 @@ struct DepthPassUniforms {
     float pointSizeScale;
     int lodDither;
     int applyDisplacement;
+    int applyTint;
+    int tintAlphaIsCoverage;
 };
 
 kernel void depthPassUpdate(
@@ -23,6 +29,9 @@ kernel void depthPassUpdate(
     device const uchar *levels [[buffer(ComputeBufferCustom6)]],
     device const VisibleBatch *visible [[buffer(ComputeBufferCustom7)]],
     device const float3 *displacements [[buffer(ComputeBufferCustom8)]],
+    // Custom9 (colors) is unused by the depth pass; tints share Custom10 with the
+    // colour pass so the buffer binds at one index across both processors.
+    device const float4 *tints [[buffer(ComputeBufferCustom10)]],
     uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
@@ -44,6 +53,14 @@ kernel void depthPassUpdate(
         const float dither = (uniforms.lodDither != 0) ? hashUnit(pointIndex) : 0.5;
         if (dither >= lodThreshold - pointLevel + 0.5) {
             continue;
+        }
+        // Translucent defocus: drop only the discard sentinel here. All other
+        // points still write depth (used solely as the nearest cloud surface for
+        // the scene composite). The colour pass does NOT depth-test in coverage
+        // mode — it weighted-blends every point (order-independent), so there's no
+        // hard occlusion edge at the focus boundary.
+        if (uniforms.applyTint != 0 && uniforms.tintAlphaIsCoverage != 0) {
+            if (tints[pointIndex].a < 0.0) { continue; }
         }
         float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
         if (uniforms.applyDisplacement != 0) {

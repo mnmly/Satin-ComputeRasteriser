@@ -67,6 +67,16 @@ public final class TintPass {
     /// Fired on main after a live-reload rebuilds the pipeline.
     public var onReloaded: (() -> Void)?
 
+    /// Opt this tint into **translucent defocus**: the kernel writes a
+    /// circle-of-confusion into `tints[i].a` (0 = in focus) and keeps the native
+    /// colour; the rasteriser then treats defocused points as translucent (they
+    /// skip the depth write and accumulate coverage-weighted via weighted-blended
+    /// OIT) instead of a colour mix. Flips
+    /// `ComputeRasteriserConfiguration.tintAlphaIsCoverage` on encode — see that
+    /// flag for the full mechanism **and the performance trade-off** (cost scales
+    /// with overdraw because the depth-test early-out is dropped).
+    public var alphaIsCoverage: Bool = false
+
     // MARK: - State
 
     private weak var rasteriser: ComputeRasteriser?
@@ -143,6 +153,9 @@ public final class TintPass {
 
         if !rasteriser.configuration.applyTint {
             rasteriser.configuration.applyTint = true
+        }
+        if rasteriser.configuration.tintAlphaIsCoverage != alphaIsCoverage {
+            rasteriser.configuration.tintAlphaIsCoverage = alphaIsCoverage
         }
 
         var infoData = InfoData(pointsPerBatch: UInt32(target.capacity.pointsPerBatch))
