@@ -4,7 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "Satin-ComputeRasteriser",
-    platforms: [.macOS(.v15), .iOS(.v17)],
+    platforms: [.macOS(.v15), .iOS(.v18)],
     products: [
         .library(
             name: "SatinComputeRasteriser",
@@ -16,9 +16,9 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/Fabric-Project/Satin", branch: "feature/2.0"),
-        .package(url: "https://github.com/mnmly/SwiftPDAL", from: "1.7.1"),
-        .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.4.3"),
+        .package(url: "https://github.com/Fabric-Project/Satin", exact: "20.0.0-Beta-1"),
+        .package(url: "https://github.com/mnmly/SwiftPDAL", from: "1.14.0"),
+        .package(url: "https://github.com/swiftlang/swift-docc-plugin", from: "1.5.0"),
     ],
     targets: [
         .target(
