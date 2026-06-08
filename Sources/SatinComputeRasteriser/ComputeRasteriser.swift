@@ -141,8 +141,21 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         remove(cloud)
     }
 
+    /// All point clouds in the rasteriser's subtree — not just direct children.
+    /// This lets clouds be organised under intermediate group `Object`s (e.g. a
+    /// per-capture / per-month parent node) while still being culled, packed,
+    /// and drawn. Each cloud's `worldMatrix` (used at render time) already
+    /// composes any parent-group transform, so nesting is positionally correct.
     public var pointClouds: [ComputeRasteriserPointCloud] {
-        children.compactMap { $0 as? ComputeRasteriserPointCloud }
+        var out: [ComputeRasteriserPointCloud] = []
+        func collect(_ object: Object) {
+            for child in object.children {
+                if let cloud = child as? ComputeRasteriserPointCloud { out.append(cloud) }
+                collect(child)
+            }
+        }
+        collect(self)
+        return out
     }
 
     public func resize(size: (width: Float, height: Float), scaleFactor: Float = 1.0) {
