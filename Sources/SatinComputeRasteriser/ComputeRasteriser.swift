@@ -158,6 +158,30 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         return out
     }
 
+    /// Point clouds in the subtree that are effectively visible — the cloud's
+    /// own `visible` **and** every intermediate group node up to this rasteriser
+    /// is `visible`. A hidden group node therefore hides all of its child
+    /// clouds, matching Satin's tree-visibility semantics for meshes (the
+    /// renderer skips an invisible object's whole subtree). Computed top-down so
+    /// it needs no access to Satin's internal `parent` link.
+    ///
+    /// Drawing/culling is gated on this; residency (``pointClouds``) is not, so
+    /// toggling a group's visibility is instant and never re-streams its clouds.
+    public var visiblePointClouds: [ComputeRasteriserPointCloud] {
+        var out: [ComputeRasteriserPointCloud] = []
+        func collect(_ object: Object, ancestorsVisible: Bool) {
+            for child in object.children {
+                let chainVisible = ancestorsVisible && child.visible
+                if let cloud = child as? ComputeRasteriserPointCloud, chainVisible {
+                    out.append(cloud)
+                }
+                collect(child, ancestorsVisible: chainVisible)
+            }
+        }
+        collect(self, ancestorsVisible: true)
+        return out
+    }
+
     public func resize(size: (width: Float, height: Float), scaleFactor: Float = 1.0) {
         let nextViewport = SIMD4<Float>(0, 0, size.width, size.height)
         guard nextViewport != viewport || scaleFactor != self.scaleFactor else { return }
@@ -221,7 +245,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         colorProcessor.colorizeChunks = configuration.colorizeChunks
         colorProcessor.colorizeOverdraw = configuration.colorizeOverdraw
 
-        for cloud in pointClouds where cloud.visible {
+        for cloud in visiblePointClouds {
             cloud.updateFiles(viewProjection: viewProjection, modelMatrix: cloud.worldMatrix)
         }
     }
@@ -278,8 +302,8 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         // sized to the largest drawable cloud so every cloud's reads are in-bounds.
         currentStandIn = nil
         if configuration.applyDisplacement || configuration.applyTint {
-            let maxPoints = pointClouds
-                .filter { $0.visible && $0.residentBatchCount > 0 }
+            let maxPoints = visiblePointClouds
+                .filter { $0.residentBatchCount > 0 }
                 .map { $0.capacity.maxResidentPoints }
                 .max() ?? 0
             if maxPoints > 0 {
@@ -304,7 +328,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         // phases — same guarantee the per-cloud depth→color ordering already
         // relied on. Pass counts are unchanged: cull+depth+color once each.
         var culledClouds: [ComputeRasteriserPointCloud] = []
-        for cloud in pointClouds where cloud.visible && cloud.residentBatchCount > 0 {
+        for cloud in visiblePointClouds where cloud.residentBatchCount > 0 {
             guard runCullPass(commandBuffer, cloud: cloud) else { continue }
 
             bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
@@ -332,7 +356,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
     private func encodeNearestPoint(_ commandBuffer: MTLCommandBuffer) {
         guard let nearestDepthBuffer,
               let nearestIndexBuffer,
-              let cloud = pointClouds.first(where: { $0.visible && $0.residentBatchCount > 0 })
+              let cloud = visiblePointClouds.first(where: { $0.residentBatchCount > 0 })
         else { return }
 
         clearWinnerProcessor.depthBuffer = nearestDepthBuffer
