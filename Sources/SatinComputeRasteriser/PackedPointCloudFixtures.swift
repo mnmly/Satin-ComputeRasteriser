@@ -139,7 +139,8 @@ public enum PackedPointCloudFixtures {
             levels: levels,
             boundsMin: boundsMin,
             boundsMax: boundsMax,
-            orderedPositions: sortedPositions
+            orderedPositions: sortedPositions,
+            sourceIndices: order.map { UInt32($0) }
         )
     }
 }

@@ -220,6 +220,13 @@ public struct PackedPointCloud: Sendable {
     /// Use this to populate a per-point displacement buffer keyed by the same
     /// `pointIndex` the rasteriser shader uses.
     public var orderedPositions: [SIMD3<Float>]
+    /// The pack permutation: `sourceIndices[packedIndex]` is the index of that
+    /// point in the loader's **original** (pre-Morton-sort) input arrays. Lets a
+    /// caller map a rasteriser `pointIndex` (e.g. from a nearest-point pick) back
+    /// to the source point so it can resolve that point's full attribute set.
+    /// Empty when a loader didn't build the cloud through ``pack`` (e.g. paged /
+    /// streaming loaders that pack on the GPU).
+    public var sourceIndices: [UInt32]
 
     public var pointCount: Int { colors.count }
     public var batchCount: Int { batches.count }
@@ -234,7 +241,8 @@ public struct PackedPointCloud: Sendable {
         levels: [UInt8],
         boundsMin: SIMD3<Float>,
         boundsMax: SIMD3<Float>,
-        orderedPositions: [SIMD3<Float>] = []
+        orderedPositions: [SIMD3<Float>] = [],
+        sourceIndices: [UInt32] = []
     ) {
         self.batches = batches
         self.files = files
@@ -246,6 +254,7 @@ public struct PackedPointCloud: Sendable {
         self.boundsMin = boundsMin
         self.boundsMax = boundsMax
         self.orderedPositions = orderedPositions
+        self.sourceIndices = sourceIndices
     }
 }
 

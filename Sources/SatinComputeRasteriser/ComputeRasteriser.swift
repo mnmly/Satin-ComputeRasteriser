@@ -359,19 +359,7 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
               let cloud = visiblePointClouds.first(where: { $0.residentBatchCount > 0 })
         else { return }
 
-        clearWinnerProcessor.depthBuffer = nearestDepthBuffer
-        clearWinnerProcessor.indexBuffer = nearestIndexBuffer
-        clearWinnerProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
-        clearWinnerProcessor.update(commandBuffer)
-
-        guard runCullPass(commandBuffer, cloud: cloud) else { return }
-
-        bind(cloud, to: nearestDepthProcessor, pixelBuffer: nearestDepthBuffer)
-        nearestDepthProcessor.update(commandBuffer)
-
-        bind(cloud, to: nearestIndexProcessor, pixelBuffer: nearestDepthBuffer)
-        nearestIndexProcessor.indexBuffer = nearestIndexBuffer
-        nearestIndexProcessor.update(commandBuffer)
+        guard encodeNearestIndexPass(commandBuffer, cloud: cloud) else { return }
 
         nearestResolveProcessor.depthBuffer = nearestDepthBuffer
         nearestResolveProcessor.indexBuffer = nearestIndexBuffer
@@ -379,6 +367,31 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         nearestResolveProcessor.outputTexture = outputTexture
         nearestResolveProcessor.depthTexture = depthTexture
         nearestResolveProcessor.update(commandBuffer)
+    }
+
+    /// Fill `nearestDepthBuffer` + `nearestIndexBuffer` for a single `cloud`:
+    /// per pixel, the front-most resident point's depth and global packed
+    /// `pointIndex` (`UInt32.max` where no point lands). Shared by the
+    /// `.nearestPoint` render mode and ``pickPointIndex(atNDC:in:camera:)``.
+    /// Writes only those two buffers — **no** resolve, so no output/depth
+    /// texture is touched and it is safe to run as an off-screen pick.
+    private func encodeNearestIndexPass(_ commandBuffer: MTLCommandBuffer, cloud: ComputeRasteriserPointCloud) -> Bool {
+        guard let nearestDepthBuffer, let nearestIndexBuffer else { return false }
+
+        clearWinnerProcessor.depthBuffer = nearestDepthBuffer
+        clearWinnerProcessor.indexBuffer = nearestIndexBuffer
+        clearWinnerProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
+        clearWinnerProcessor.update(commandBuffer)
+
+        guard runCullPass(commandBuffer, cloud: cloud) else { return false }
+
+        bind(cloud, to: nearestDepthProcessor, pixelBuffer: nearestDepthBuffer)
+        nearestDepthProcessor.update(commandBuffer)
+
+        bind(cloud, to: nearestIndexProcessor, pixelBuffer: nearestDepthBuffer)
+        nearestIndexProcessor.indexBuffer = nearestIndexBuffer
+        nearestIndexProcessor.update(commandBuffer)
+        return true
     }
 
     private func runCullPass(_ commandBuffer: MTLCommandBuffer, cloud: ComputeRasteriserPointCloud) -> Bool {
@@ -407,6 +420,123 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         cullFinalizeProcessor.update(commandBuffer)
 
         return true
+    }
+
+    // MARK: - Per-point picking
+
+    /// Configure the cull + nearest-pass processors for `camera` at the current
+    /// viewport, mirroring the subset of ``update(renderContext:camera:viewport:index:)``
+    /// the nearest-index pass relies on. Lets ``pickPointIndex(atNDC:in:camera:)``
+    /// run outside the live update/encode cycle.
+    private func configureNearestProcessors(camera: Camera) {
+        let screenSize = SIMD2<UInt32>(UInt32(max(viewport.z, 0)), UInt32(max(viewport.w, 0)))
+        cullProcessor.screenSize = screenSize
+        cullProcessor.viewMatrix = camera.viewMatrix
+        cullProcessor.projectionMatrix = camera.projectionMatrix
+        cullProcessor.enableFrustumCulling = configuration.enableFrustumCulling
+        cullProcessor.lodBias = configuration.lodBias
+        cullProcessor.enableCLOD = configuration.enableCLOD
+
+        for processor in [nearestDepthProcessor, nearestIndexProcessor] {
+            processor.screenSize = screenSize
+            processor.viewMatrix = camera.viewMatrix
+            processor.projectionMatrix = camera.projectionMatrix
+            processor.pointSizeMode = configuration.pointSizeMode
+            processor.minimumPointSize = configuration.minimumPointSize
+            processor.maximumPointSize = configuration.maximumPointSize
+            processor.pointSizeScale = configuration.pointSizeScale
+            processor.lodDither = configuration.enableLODDither
+        }
+    }
+
+    /// Pick the front-most resident point of `cloud` under a viewport location,
+    /// for per-point selection.
+    ///
+    /// Runs the nearest-point pass (cull → nearest-depth → nearest-index) for
+    /// just `cloud` on its own command buffer, then reads back the winning point
+    /// for the pixel. The returned value is the **global packed point index** —
+    /// the same `pointIndex` the rasteriser shaders, ``DisplacementPass`` and
+    /// ``TintPass`` use, and the index into a ``PackedPointCloud``'s
+    /// ``PackedPointCloud/sourceIndices`` (to recover the original source point).
+    ///
+    /// - Important: This encodes, commits, and **waits** on its own command
+    ///   buffer, and shares the rasteriser's per-viewport nearest/cull buffers
+    ///   with the live render. Call it between frames (e.g. from a click
+    ///   handler), never from inside the render loop. It writes only the
+    ///   nearest depth/index buffers — no output or depth texture is touched, so
+    ///   the live frame's composited image is left intact.
+    ///
+    /// - Parameters:
+    ///   - ndc: Normalised device coordinates of the pick location, x and y in
+    ///     `[-1, 1]` with **y up** (`+1` = top of the viewport) — the same
+    ///     convention as `Ray(camera:coordinate:)`.
+    ///   - cloud: The point cloud to test (one of ``pointClouds``). Picking is
+    ///     per-cloud so a mosaic resolves the right object.
+    ///   - camera: The camera the cloud is currently rendered through.
+    /// - Returns: The global packed point index under `ndc`, or `nil` if the
+    ///   cloud has no resident points, the location is off-cloud, or resources
+    ///   aren't allocated yet.
+    public func pickPointIndex(
+        atNDC ndc: SIMD2<Float>,
+        in cloud: ComputeRasteriserPointCloud,
+        camera: Camera,
+        searchRadius: Int = 10
+    ) -> UInt32? {
+        let width = Int(viewport.z)
+        let height = Int(viewport.w)
+        guard width > 0, height > 0, cloud.residentBatchCount > 0, nearestIndexBuffer != nil else { return nil }
+
+        // NDC (y-up) → buffer pixel. The nearest-index shader writes row 0 at the
+        // top of the viewport (it flips Y), so flip here to match its addressing.
+        let px = min(max(Int((ndc.x * 0.5 + 0.5) * Float(width)), 0), width - 1)
+        let pyFromBottom = Int((ndc.y * 0.5 + 0.5) * Float(height))
+        let py = min(max(height - 1 - pyFromBottom, 0), height - 1)
+
+        configureNearestProcessors(camera: camera)
+        cloud.updateFiles(viewProjection: camera.projectionMatrix * camera.viewMatrix, modelMatrix: cloud.worldMatrix)
+
+        // Point clouds are sparse: the exact cursor pixel often has no rendered
+        // point even when you click "on" the cloud. So read back a band of rows
+        // around the cursor and return the nearest hit within `searchRadius` px.
+        let stride = MemoryLayout<UInt32>.stride
+        let r = max(0, searchRadius)
+        let rowStart = max(0, py - r)
+        let rowEnd = min(height - 1, py + r)
+        let rowCount = rowEnd - rowStart + 1
+        let bandLength = rowCount * width * stride
+
+        guard let commandBuffer = context.commandQueue.makeCommandBuffer() else { return nil }
+        commandBuffer.label = "\(label).Pick"
+        guard encodeNearestIndexPass(commandBuffer, cloud: cloud),
+              let nearestIndexBuffer,
+              let staging = context.device.makeBuffer(length: bandLength, options: .storageModeShared),
+              let blit = commandBuffer.makeBlitCommandEncoder()
+        else { return nil }
+
+        blit.label = "\(label).PickReadback"
+        blit.copy(from: nearestIndexBuffer, sourceOffset: rowStart * width * stride,
+                  to: staging, destinationOffset: 0, size: bandLength)
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        // Nearest non-sentinel pixel to the cursor within the circular window.
+        let buf = staging.contents().bindMemory(to: UInt32.self, capacity: rowCount * width)
+        var best: UInt32?
+        var bestDist = Int.max
+        let r2 = r * r
+        for y in rowStart...rowEnd {
+            let dy = y - py
+            let rowBase = (y - rowStart) * width
+            for x in max(0, px - r)...min(width - 1, px + r) {
+                let dx = x - px
+                let dist = dx * dx + dy * dy
+                if dist > r2 || dist >= bestDist { continue }
+                let v = buf[rowBase + x]
+                if v != UInt32.max { bestDist = dist; best = v }
+            }
+        }
+        return best
     }
 
     public func draw(renderPassDescriptor: MTLRenderPassDescriptor, commandBuffer: MTLCommandBuffer) {
