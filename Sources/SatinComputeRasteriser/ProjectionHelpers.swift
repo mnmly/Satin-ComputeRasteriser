@@ -24,10 +24,16 @@ public enum ComputeRasteriserProjection {
     /// non-FOV-aware constant breaks it (every camera gets the same
     /// "size-on-screen" verdict regardless of zoom).
     ///
+    /// **Orthographic projections work too.** For an orthographic matrix
+    /// `projectionMatrix[1][1] = 2 / orthoHeight`, so this same expression
+    /// yields the absolute (depth-independent) pixels-per-world-unit scale
+    /// rather than a FOV-derived one. SwiftPDAL's scorer consumes both forms
+    /// ortho-aware — no distance division is applied for the orthographic case.
+    ///
     /// - Parameters:
     ///   - viewportHeight: drawable height in pixels.
-    ///   - projectionMatrix: any perspective projection matrix in
-    ///     column-major (Metal/simd) layout.
+    ///   - projectionMatrix: any perspective or orthographic projection matrix
+    ///     in column-major (Metal/simd) layout.
     @inlinable
     public static func screenSpacePixelScale(
         viewportHeight: Float,

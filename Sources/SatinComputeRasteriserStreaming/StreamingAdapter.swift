@@ -10,13 +10,17 @@ import simd
 /// The renderer package stays free of PDAL/lazperf; this adapter is the
 /// glue layer where the streaming driver and the GPU residency pool meet.
 /// Per frame: submit the camera view, drain the driver's `(added, removed)`
-/// delta, free evicted slots, upload new chunks, and commit once at the end
-/// of the tick so a residency churn costs one buffer flush rather than one
-/// per chunk.
+/// delta, free evicted slots, upload up to ``maxChunkUploadsPerTick`` new
+/// chunks (the remainder carries over to later ticks), and commit once at
+/// the end of the tick so a residency churn costs one buffer flush rather
+/// than one per chunk.
 public final class StreamingAdapter {
     private let source: any StreamingPointCloudSource
     private let cloud: ComputeRasteriserPointCloud
     private var slotsByChunk: [ChunkID: [Int]] = [:]
+    /// Newly-streamed chunks awaiting upload, drained ``maxChunkUploadsPerTick``
+    /// at a time per ``update(camera:viewport:)`` call.
+    private var pendingAdds: [ResidentChunk] = []
 
     /// Number of chunks currently resident in the slot pool.
     public private(set) var residentChunks: Int = 0
@@ -26,6 +30,13 @@ public final class StreamingAdapter {
     /// typically a "slot pool full" notice when the resident budget is
     /// undersized for what the scorer wants to bring in.
     public private(set) var lastError: String?
+    /// Bounds how many newly-streamed chunks are uploaded (memcpy'd to the
+    /// GPU slot pool) per ``update(camera:viewport:)`` call. A residency
+    /// burst of dozens of chunks would otherwise upload — and hitch — in a
+    /// single frame; chunks past the cap carry over to subsequent ticks.
+    /// Set to `Int.max` to restore the old unbounded, upload-everything-now
+    /// behavior.
+    public var maxChunkUploadsPerTick: Int = 4
 
     /// Creates an adapter that owns no resources of its own — it merely
     /// routes data between `source` and `cloud`.
@@ -65,28 +76,42 @@ public final class StreamingAdapter {
         )
         source.submit(view: view)
 
-        guard let delta = source.pollLatest() else { return }
+        let delta = source.pollLatest()
+        guard delta != nil || !pendingAdds.isEmpty else { return }
 
         // Evictions first so freed slots are available for the new chunks.
         // Defer the GPU-side flush — one commitBatchUpdates() at the end
         // of the tick covers both the removes and all the adds, instead of
         // re-uploading the full batch mirror per chunk.
         var dirty = false
-        var slotsToFree: [Int] = []
-        for id in delta.removed {
-            if let slots = slotsByChunk.removeValue(forKey: id) {
-                slotsToFree.append(contentsOf: slots)
+        if let delta {
+            var slotsToFree: [Int] = []
+            for id in delta.removed {
+                if let slots = slotsByChunk.removeValue(forKey: id) {
+                    slotsToFree.append(contentsOf: slots)
+                }
+                // The GPU never saw a still-pending add for a chunk that got
+                // evicted before its turn — drop it rather than resurrect it.
+                pendingAdds.removeAll { $0.id == id }
             }
-        }
-        if !slotsToFree.isEmpty {
-            cloud.removeBatches(slots: slotsToFree, commit: false)
-            dirty = true
+            if !slotsToFree.isEmpty {
+                cloud.removeBatches(slots: slotsToFree, commit: false)
+                dirty = true
+            }
+            pendingAdds.append(contentsOf: delta.added)
         }
 
-        for chunk in delta.added {
+        // Upload at most `maxChunkUploadsPerTick` chunks this frame; the rest
+        // stay queued and upload on subsequent ticks. Bounds the per-frame
+        // main-thread memcpy cost when a residency burst brings in dozens of
+        // chunks at once.
+        var uploaded = 0
+        while uploaded < maxChunkUploadsPerTick, !pendingAdds.isEmpty {
+            let chunk = pendingAdds.removeFirst()
             let batches = chunk.batches.map(Self.toRasterBatch)
             guard cloud.freeSlotCount >= batches.count else {
                 lastError = "slot pool full (capacity \(cloud.batchCount)); raise budget or maxResidentBatches"
+                uploaded += 1
                 continue
             }
             let slots = cloud.addBatches(
@@ -100,6 +125,7 @@ public final class StreamingAdapter {
             )
             slotsByChunk[chunk.id] = slots
             dirty = true
+            uploaded += 1
         }
 
         if dirty { cloud.commitBatchUpdates() }
@@ -109,7 +135,7 @@ public final class StreamingAdapter {
     }
 
     /// Closes the underlying source. Idempotent on the source side.
-    public func close() { source.close() }
+    public func close() { pendingAdds.removeAll(); source.close() }
 
     private static func toRasterBatch(_ s: StreamingRasterBatch) -> RasterBatch {
         var b = RasterBatch(

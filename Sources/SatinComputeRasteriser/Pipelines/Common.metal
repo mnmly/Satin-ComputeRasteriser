@@ -31,14 +31,27 @@ inline int pointFootprintRadius(
     const float lo = max(min(minimumPointSize, maximumPointSize), 1.0);
     const float hi = max(max(minimumPointSize, maximumPointSize), lo);
 
+    // Orthographic apparent size must not vary with depth. projectionMatrix[3][3]
+    // (column 3, row 3 — Metal's float4x4 is column-major) is 1.0 for an
+    // orthographic projection and 0.0 for a perspective one.
+    const bool ortho = (projectionMatrix[3][3] == 1.0);
+
     float pointSize;
     if (pointSizeMode == 1) {
-        const float viewZ = max(-viewPos.z, 0.000001);
         const float focal = float(screenSize.y) * 0.5 * projectionMatrix[1][1];
-        pointSize = 2.0 * pointSizeScale * focal / viewZ;
+        if (ortho) {
+            pointSize = 2.0 * pointSizeScale * focal;
+        } else {
+            const float viewZ = max(-viewPos.z, 0.000001);
+            pointSize = 2.0 * pointSizeScale * focal / viewZ;
+        }
     } else {
-        const float viewDistance = max(length(viewPos.xyz), 0.000001);
-        pointSize = pointSizeScale / viewDistance;
+        if (ortho) {
+            pointSize = pointSizeScale;
+        } else {
+            const float viewDistance = max(length(viewPos.xyz), 0.000001);
+            pointSize = pointSizeScale / viewDistance;
+        }
     }
     if (!isfinite(pointSize)) {
         pointSize = lo;

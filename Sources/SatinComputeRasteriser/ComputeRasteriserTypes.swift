@@ -13,9 +13,13 @@ public enum ComputeRasteriserMode: CaseIterable, Hashable, Sendable {
 public enum PointSizeMode: Int32, CaseIterable, Hashable, Sendable {
     /// `pointSizeScale / length(viewSpacePosition)` clamped to [min, max] pixels.
     /// `pointSizeScale` behaves as "pixels at one unit of view distance"; FOV does not affect size.
+    /// Under an orthographic projection there is no depth falloff — size is a constant
+    /// `pointSizeScale` pixels regardless of distance from the camera.
     case screenSpace = 0
     /// Perspective projection of a world-space sphere radius.
     /// `pointSizeScale` is interpreted as the sphere radius in scene units; FOV and screen height affect size.
+    /// Under an orthographic projection there is no depth falloff — `pointSizeScale` maps to a
+    /// true, depth-independent world-space size via the projection's fixed pixels-per-world-unit scale.
     case worldSpace = 1
 }
 
