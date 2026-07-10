@@ -275,7 +275,12 @@ private struct TickRecord {
     let bytesPerSlot = pointsPerBatch * spy.info.bytesPerPoint
     let slots = 64
     let poolBytes = slots * bytesPerSlot
-    let sourceBudget = 512 * 1024 * 1024
+    // Small enough that the chunks decoded within the test window exceed it:
+    // with hierarchy-enforced residency (SwiftPDAL 1.21.0+) the coarse skeleton
+    // is view-stable and a lavish budget never evicts anything, so budget
+    // pressure — not just pool pressure — must be real for the slot-reuse
+    // assertion to have teeth.
+    let sourceBudget = 48 * 1024 * 1024
     let cap = ComputeRasteriserCapacity(maxResidentBatches: slots, pointsPerBatch: pointsPerBatch)
     let cloud = ComputeRasteriserPointCloud(context: context, capacity: cap,
                                             label: "StreamingHarness")
