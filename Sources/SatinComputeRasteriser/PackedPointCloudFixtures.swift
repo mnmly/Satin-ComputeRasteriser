@@ -272,16 +272,62 @@ private func computeLODLevels(
         return (cx << 42) | (cy << 21) | cz
     }
 
-    var occupied = Set<UInt64>()
-    for level in 0 ..< (lodLevels - 1) {
-        let voxelSize = baseVoxel * powf(0.5, Float(level))
-        let invVoxel = 1.0 / max(voxelSize, 0.000001)
-        occupied.removeAll(keepingCapacity: true)
-        for i in 0 ..< count {
-            if levels[i] != maxLevel { continue }
-            let local = (positions[i] - boundsMin) * invVoxel
-            if occupied.insert(cellKey(local)).inserted {
-                levels[i] = UInt8(level)
+    // Open-addressing hash set of occupied voxel keys, replacing Swift's
+    // `Set<UInt64>` — whose SipHash + CoW/uniqueness machinery dominated the
+    // streaming-decode CPU profile (~12.5% of total process CPU: Hasher._hash,
+    // _Variant.insert, isUniquelyReferenced). One `[UInt64]` table, sized once
+    // for the whole call and reused across levels, with Fibonacci hashing and
+    // linear probing in an unsafe buffer (no bounds/uniqueness checks in the
+    // probe). Mirrors `ChunkPacker.computeLODLevels` in SwiftPDAL — keep the
+    // two in sync.
+    //
+    // Sentinel is `UInt64.max`: cellKey packs 21 bits/axis into bits 0..62, so
+    // bit 63 is always 0 and a real key can never equal the sentinel.
+    //
+    // Capacity = next power of two ≥ 2·count (load factor ≤ 0.5). Sizing by the
+    // total count — not by per-level unclaimed counts — is deliberate: the
+    // eligible set shrinks with depth but the number of distinct occupied
+    // voxels (the actual live entries) grows, and `count` bounds both at every
+    // level, so one allocation stays under 0.5 load throughout. Per-level
+    // resizing would only shave the O(capacity) reset, which is already
+    // dominated by the O(count) scan — not worth the extra bookkeeping.
+    let sentinel = UInt64.max
+    var capacity = 1
+    while capacity < count * 2 { capacity <<= 1 }
+    let mask = capacity - 1
+    let shift = UInt64(64 - capacity.trailingZeroBitCount)
+
+    var table = [UInt64](repeating: sentinel, count: capacity)
+    levels.withUnsafeMutableBufferPointer { lv in
+        positions.withUnsafeBufferPointer { pos in
+            table.withUnsafeMutableBufferPointer { t in
+                for level in 0 ..< (lodLevels - 1) {
+                    let voxelSize = baseVoxel * powf(0.5, Float(level))
+                    let invVoxel = 1.0 / max(voxelSize, 0.000001)
+                    // Level 0 uses the freshly sentinel-filled table; refill for
+                    // each subsequent level. No "skip refill when no inserts"
+                    // guard: the first eligible point always inserts, so at
+                    // these coarse levels the guard would never fire.
+                    if level != 0 {
+                        for j in 0 ..< capacity { t[j] = sentinel }
+                    }
+                    for i in 0 ..< count {
+                        if lv[i] != maxLevel { continue }
+                        let local = (pos[i] - boundsMin) * invVoxel
+                        let key = cellKey(local)
+                        var slot = Int((key &* 0x9E37_79B9_7F4A_7C15) >> shift)
+                        while true {
+                            let cur = t[slot]
+                            if cur == sentinel {
+                                t[slot] = key
+                                lv[i] = UInt8(level)
+                                break
+                            }
+                            if cur == key { break }
+                            slot = (slot + 1) & mask
+                        }
+                    }
+                }
             }
         }
     }
