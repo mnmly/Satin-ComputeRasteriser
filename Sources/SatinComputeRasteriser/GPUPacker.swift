@@ -13,11 +13,14 @@ import simd
 /// evaluates on the GPU) and that re-realize a render cloud on every edit.
 ///
 /// The output is **decode-identical** to the CPU `pack()` (same Morton order
-/// up to equal-key tie order, same per-batch quantization, same LOD levels),
-/// so the rasteriser's depth/color passes render it unchanged.
+/// up to equal-key tie order, same per-batch quantization, same LOD levels,
+/// same stable level-ascending bucketing with the cumulative counts of
+/// ``RasterBatch/lodCumulativeCounts`` filled in), so the rasteriser's
+/// depth/color passes render it unchanged.
 ///
 /// Stages (each a compute kernel): global bounds → Morton key → LSD radix sort
-/// → gather → per-batch AABB → quantize → LOD voxel occupancy.
+/// → gather → LOD voxel occupancy → per-batch AABB → per-batch level bucketing
+/// → bucketed re-gather → quantize.
 ///
 /// - Note: Apple-platform only. The CPU `pack()` remains the cross-platform
 ///   reference/fallback.
@@ -52,7 +55,7 @@ public final class GPUPacker {
     private let pBoundsInit, pBounds, pMorton: MTLComputePipelineState
     private let pHistogram, pScanPerDigit, pDigitBase, pScatter: MTLComputePipelineState
     private let pGather, pBatchAABB, pQuantize: MTLComputePipelineState
-    private let pLODInit, pLODClaim, pLODAssign: MTLComputePipelineState
+    private let pLODInit, pLODClaim, pLODAssign, pBucketLOD: MTLComputePipelineState
 
     /// Independent scratch sets. A single set is reused (Metal hazard-tracking
     /// serialises packs that share it). ``addRawChunksGPU`` rings over several
@@ -120,6 +123,7 @@ public final class GPUPacker {
         pLODInit = try pipeline("packLODInit")
         pLODClaim = try pipeline("packLODClaim")
         pLODAssign = try pipeline("packLODAssign")
+        pBucketLOD = try pipeline("packBucketLOD")
     }
 
     /// Pack GPU-resident point data into `cloud`, encoding all stages onto
@@ -208,6 +212,7 @@ public final class GPUPacker {
         commandBuffer: MTLCommandBuffer
     ) {
         let ppb = cloud.capacity.pointsPerBatch
+        precondition(ppb <= 65535, "pointsPerBatch must fit the uint16 LOD prefix counts")
 
         guard let keysA = scratch.keysA, let keysB = scratch.keysB,
               let indicesA = scratch.indicesA, let indicesB = scratch.indicesB,
@@ -291,10 +296,15 @@ public final class GPUPacker {
             swap(&kIn, &kOut)
             swap(&iIn, &iOut)
         }
-        // After 4 swaps the sorted indices are back in indicesA (== iIn).
+        // After 4 swaps the sorted indices are back in indicesA (== iIn);
+        // keysB/indicesB are dead from here on and double as bucket-stage
+        // scratch (Morton-order levels / bucketed permutation).
         let sortedIndices = iIn
 
-        // 4. Gather sorted positions + pack colors into the pool slot run.
+        // 4. Gather sorted positions into Morton order. The colorsOut write is
+        //    redundant (the bucketed re-gather in stage 8 overwrites it), but
+        //    reusing the kernel beats a position-only variant — pack is not
+        //    per-frame work.
         encode(commandBuffer, pGather, threads: count) { e in
             e.setBuffer(positions, offset: 0, index: 0)
             e.setBuffer(colors, offset: 0, index: 1)
@@ -304,26 +314,13 @@ public final class GPUPacker {
             e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
         }
 
-        // 5. Per-batch AABB → batch metadata at batches[firstSlot..].
-        encodeGroups(commandBuffer, pBatchAABB, groups: numBatches, threadsPerGroup: 256) { e in
-            e.setBuffer(sortedPos, offset: 0, index: 0)
-            e.setBuffer(batches, offset: batchOff, index: 1)
-            e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 2)
-        }
-
-        // 6. Quantize → xyzLow/Med/High at the slot run.
-        encode(commandBuffer, pQuantize, threads: count) { e in
-            e.setBuffer(sortedPos, offset: 0, index: 0)
-            e.setBuffer(batches, offset: batchOff, index: 1)
-            e.setBuffer(xyzLow, offset: xyzOff, index: 2)
-            e.setBuffer(xyzMed, offset: xyzOff, index: 3)
-            e.setBuffer(xyzHigh, offset: xyzOff, index: 4)
-            e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
-        }
-
-        // 7. LOD voxel occupancy → levels at the slot run.
+        // 5. LOD voxel occupancy → Morton-order levels in scratch (keysB, one
+        //    uchar per point). Must run on the PRE-bucket order: atomic_min
+        //    "lowest sorted index per voxel wins" has to see the same order the
+        //    CPU's occupancy walk sees.
+        let mortonLevels = keysB
         encode(commandBuffer, pLODInit, threads: count) { e in
-            e.setBuffer(levels, offset: lvlOff, index: 0)
+            e.setBuffer(mortonLevels, offset: 0, index: 0)
             e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 1)
         }
         if lodLevels > 1, let lodGrid = scratch.lodGrid {
@@ -337,19 +334,60 @@ public final class GPUPacker {
                 }
                 encode(commandBuffer, pLODClaim, threads: count) { e in
                     e.setBuffer(sortedPos, offset: 0, index: 0)
-                    e.setBuffer(levels, offset: lvlOff, index: 1)
+                    e.setBuffer(mortonLevels, offset: 0, index: 1)
                     e.setBuffer(lodGrid, offset: 0, index: 2)
                     e.setBuffer(boundsBuf, offset: 0, index: 3)
                     e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 4)
                 }
                 encode(commandBuffer, pLODAssign, threads: count) { e in
                     e.setBuffer(sortedPos, offset: 0, index: 0)
-                    e.setBuffer(levels, offset: lvlOff, index: 1)
+                    e.setBuffer(mortonLevels, offset: 0, index: 1)
                     e.setBuffer(lodGrid, offset: 0, index: 2)
                     e.setBuffer(boundsBuf, offset: 0, index: 3)
                     e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 4)
                 }
             }
+        }
+
+        // 6. Per-batch AABB → batch metadata at batches[firstSlot..]. The AABB
+        //    is permutation-invariant within a batch slice, so it can run on
+        //    the Morton-ordered positions; the bucket stage patches p3..p6.
+        encodeGroups(commandBuffer, pBatchAABB, groups: numBatches, threadsPerGroup: 256) { e in
+            e.setBuffer(sortedPos, offset: 0, index: 0)
+            e.setBuffer(batches, offset: batchOff, index: 1)
+            e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 2)
+        }
+
+        // 7. Stable per-batch level bucketing → permuted indices (indicesB),
+        //    final-order levels at the slot run, cumulative counts into p3..p6.
+        encode(commandBuffer, pBucketLOD, threads: numBatches) { e in
+            e.setBuffer(mortonLevels, offset: 0, index: 0)
+            e.setBuffer(sortedIndices, offset: 0, index: 1)
+            e.setBuffer(indicesB, offset: 0, index: 2)
+            e.setBuffer(levels, offset: lvlOff, index: 3)
+            e.setBuffer(batches, offset: batchOff, index: 4)
+            e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
+        }
+
+        // 8. Re-gather with the bucketed permutation → final point order in
+        //    sortedPos + packed colors at the slot run.
+        encode(commandBuffer, pGather, threads: count) { e in
+            e.setBuffer(positions, offset: 0, index: 0)
+            e.setBuffer(colors, offset: 0, index: 1)
+            e.setBuffer(indicesB, offset: 0, index: 2)
+            e.setBuffer(sortedPos, offset: 0, index: 3)
+            e.setBuffer(colorsOut, offset: colOff, index: 4)
+            e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
+        }
+
+        // 9. Quantize → xyzLow/Med/High at the slot run.
+        encode(commandBuffer, pQuantize, threads: count) { e in
+            e.setBuffer(sortedPos, offset: 0, index: 0)
+            e.setBuffer(batches, offset: batchOff, index: 1)
+            e.setBuffer(xyzLow, offset: xyzOff, index: 2)
+            e.setBuffer(xyzMed, offset: xyzOff, index: 3)
+            e.setBuffer(xyzHigh, offset: xyzOff, index: 4)
+            e.setBytes(&params, length: MemoryLayout<PackParams>.stride, index: 5)
         }
     }
 
@@ -407,6 +445,11 @@ public final class GPUPacker {
 /// the dense LOD voxel grid. ``GPUPacker`` keeps a ring of these so several
 /// chunks packed into one command buffer use *different* scratch and overlap on
 /// the GPU rather than serialising under Metal hazard tracking.
+///
+/// After the radix sort's final pass, `keysB`/`indicesB` are dead and are
+/// reused by the LOD-bucket stage: `keysB` holds the Morton-order LOD levels
+/// (one `uchar` per point, well within its 4 bytes/point) and `indicesB`
+/// receives the bucketed index permutation for the second gather.
 private final class PackScratch {
     var capacityPoints = 0
     var keysA, keysB, indicesA, indicesB: MTLBuffer?
