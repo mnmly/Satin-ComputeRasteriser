@@ -50,11 +50,14 @@ kernel void colorPassUpdate(
     const RasterFile file = files[batch.fileIndex];
     const int level = vb.level;
     const float lodThreshold = vb.lodThreshold;
-    const uint pointsPerThread = (batch.numPoints + CR_THREADS_PER_GROUP - 1u) / CR_THREADS_PER_GROUP;
+    // Survivor prefix from the cull pass (numPoints for legacy batches); the
+    // per-point dither test below stays authoritative within it.
+    const uint activePoints = vb.activePoints;
+    const uint pointsPerThread = (activePoints + CR_THREADS_PER_GROUP - 1u) / CR_THREADS_PER_GROUP;
 
     for (uint i = 0; i < pointsPerThread; i++) {
         const uint localIndex = i * CR_THREADS_PER_GROUP + lid;
-        if (localIndex >= batch.numPoints) {
+        if (localIndex >= activePoints) {
             continue;
         }
 

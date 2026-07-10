@@ -55,9 +55,26 @@ kernel void cullUpdate(
     const float lodThreshold = (uniforms.enableCLOD != 0)
         ? max(0.0, lodThresholdFromPixelSize(pixelSize, uniforms.lodBias))
         : 99.0;
+
+    // Level-bucketed batches store points level-ascending with cumulative
+    // counts in lodCum01..67, so the draw passes only need the survivor
+    // prefix: the keep-test `dither < lodThreshold - pointLevel + 0.5` with
+    // dither in [0,1) can only pass when pointLevel < lodThreshold + 0.5,
+    // i.e. within cum[Lmax]. Legacy batches (lodCum67 == 0, since
+    // cum7 == numPoints > 0 when bucketed) draw the full range as before.
+    uint activePoints = batch.numPoints;
+    if (batch.lodCum67 != 0u) {
+        const int lmax = clamp(int(floor(lodThreshold + 0.5)), 0, 7);
+        const uint words[4] = { batch.lodCum01, batch.lodCum23, batch.lodCum45, batch.lodCum67 };
+        const uint word = words[lmax >> 1];
+        activePoints = ((lmax & 1) != 0) ? (word >> 16) : (word & 0xffffu);
+    }
+    if (activePoints == 0u) {
+        return;
+    }
     const uint slot = atomic_fetch_add_explicit(counter, 1u, memory_order_relaxed);
     visible[slot].batchIndex = gid;
     visible[slot].level = level;
     visible[slot].lodThreshold = lodThreshold;
-    visible[slot].padding = 0u;
+    visible[slot].activePoints = activePoints;
 }

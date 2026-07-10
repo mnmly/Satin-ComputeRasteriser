@@ -184,6 +184,43 @@ public struct RasterBatch: Sendable {
         self.padding7 = 0
         self.padding8 = 0
     }
+
+    /// Cumulative LOD level counts for a level-bucketed batch.
+    ///
+    /// `counts[L]` is the number of points in the batch with level ≤ `L`, so
+    /// `counts[7] == numPoints` for a bucketed batch. The counts live packed
+    /// two-per-word in ``padding3``…``padding6`` (low level in the low half);
+    /// an all-zero result — specifically `counts[7] == 0` — is the legacy
+    /// sentinel meaning the batch's points are *not* stored level-ascending
+    /// and the cull pass must draw the full `numPoints` range.
+    public var lodCumulativeCounts: [UInt16] {
+        [
+            UInt16(truncatingIfNeeded: padding3), UInt16(truncatingIfNeeded: padding3 >> 16),
+            UInt16(truncatingIfNeeded: padding4), UInt16(truncatingIfNeeded: padding4 >> 16),
+            UInt16(truncatingIfNeeded: padding5), UInt16(truncatingIfNeeded: padding5 >> 16),
+            UInt16(truncatingIfNeeded: padding6), UInt16(truncatingIfNeeded: padding6 >> 16),
+        ]
+    }
+
+    /// Stores the 8 cumulative LOD level counts into ``padding3``…``padding6``.
+    ///
+    /// Callers (packers that store batch points level-ascending) must pass
+    /// `counts[L]` = number of points with level ≤ `L`, with
+    /// `counts[7] == numPoints`; a non-zero final word is what marks the batch
+    /// as bucketed for the cull kernel (see ``lodCumulativeCounts``).
+    ///
+    /// - Parameter counts: Exactly 8 non-decreasing cumulative counts, each
+    ///   ≤ 65535 (batches must therefore hold at most 65535 points).
+    public mutating func setLODCumulativeCounts(_ counts: [Int]) {
+        precondition(counts.count == 8, "expected 8 cumulative level counts, got \(counts.count)")
+        for count in counts {
+            precondition(count >= 0 && count <= 65535, "cumulative count \(count) does not fit uint16")
+        }
+        padding3 = UInt32(counts[0]) | (UInt32(counts[1]) << 16)
+        padding4 = UInt32(counts[2]) | (UInt32(counts[3]) << 16)
+        padding5 = UInt32(counts[4]) | (UInt32(counts[5]) << 16)
+        padding6 = UInt32(counts[6]) | (UInt32(counts[7]) << 16)
+    }
 }
 
 public struct RasterFile: Sendable {
@@ -286,13 +323,18 @@ public struct VisibleBatch: Sendable {
     public var batchIndex: UInt32
     public var level: Int32
     public var lodThreshold: Float
-    public var padding: UInt32
+    /// Number of points at the start of the batch the draw passes iterate —
+    /// the LOD survivor prefix the cull kernel computes from
+    /// ``RasterBatch/lodCumulativeCounts``. Equals the batch's full
+    /// `numPoints` for legacy (unbucketed) batches. (Formerly reserved
+    /// `padding`; stride unchanged.)
+    public var activePoints: UInt32
 
     public init(batchIndex: UInt32 = 0, level: Int32 = 0, lodThreshold: Float = 0) {
         self.batchIndex = batchIndex
         self.level = level
         self.lodThreshold = lodThreshold
-        self.padding = 0
+        self.activePoints = 0
     }
 }
 

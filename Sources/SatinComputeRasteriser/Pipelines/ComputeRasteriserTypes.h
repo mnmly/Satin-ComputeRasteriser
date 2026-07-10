@@ -19,10 +19,15 @@ typedef struct {
     uint numPoints;
     uint firstPoint;
     uint fileIndex;
-    uint padding3;
-    uint padding4;
-    uint padding5;
-    uint padding6;
+    // Cumulative LOD level counts, two uint16 per word (low level in the low
+    // half): lodCum01 = cum0 | cum1<<16 … lodCum67 = cum6 | cum7<<16, where
+    // cum[L] = points in the batch with level <= L. cum7 == numPoints for a
+    // bucketed batch, so lodCum67 == 0 is the legacy sentinel (draw the full
+    // numPoints range). Mirrors RasterBatch.padding3..6 on the Swift side.
+    uint lodCum01;
+    uint lodCum23;
+    uint lodCum45;
+    uint lodCum67;
     uint padding7;
     uint padding8;
 } RasterBatch;
@@ -48,7 +53,7 @@ typedef struct {
     uint batchIndex;
     int level;
     float lodThreshold;
-    uint padding;
+    uint activePoints;   // LOD survivor prefix length computed by cullUpdate
 } VisibleBatch;
 
 typedef struct {

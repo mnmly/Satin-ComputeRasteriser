@@ -56,16 +56,31 @@ public enum PackedPointCloudFixtures {
             boundsMax = simd_max(boundsMax, position)
         }
 
-        let order = mortonOrder(positions: positions, boundsMin: boundsMin, boundsMax: boundsMax)
-        let sortedPositions = order.map { positions[$0] }
-        let sortedColorsSrc = order.map { colors[$0] }
-        let levels = computeLODLevels(
+        var order = mortonOrder(positions: positions, boundsMin: boundsMin, boundsMax: boundsMax)
+        var sortedPositions = order.map { positions[$0] }
+        var levels = computeLODLevels(
             positions: sortedPositions,
             boundsMin: boundsMin,
             boundsMax: boundsMax,
             lodLevels: max(1, min(lodLevels, 8)),
             coarseVoxelDivisions: max(1, coarseVoxelDivisions)
         )
+
+        // Bucket each batch slice level-ascending (stable, so Morton order is
+        // preserved within a level) and compose the permutation into `order`,
+        // so colors — gathered below — plus `sourceIndices`/`orderedPositions`
+        // all follow the same final point order. The cull pass uses the
+        // per-batch cumulative counts to bound the draw loops.
+        let batchStride = max(pointsPerBatch, 1)
+        precondition(batchStride <= 65535, "pointsPerBatch must fit the uint16 LOD prefix counts")
+        bucketSortBatchSlicesByLevel(
+            order: &order,
+            positions: &sortedPositions,
+            levels: &levels,
+            batchStride: batchStride
+        )
+
+        let sortedColorsSrc = order.map { colors[$0] }
 
         var batches: [RasterBatch] = []
         var xyzLow = Array(repeating: UInt32(0), count: sortedPositions.count)
@@ -109,15 +124,22 @@ public enum PackedPointCloudFixtures {
                 xyzHigh[pointIndex] = xHigh | (yHigh << 10) | (zHigh << 20)
             }
 
-            batches.append(
-                RasterBatch(
-                    min: batchMin,
-                    max: batchMax,
-                    numPoints: UInt32(end - first),
-                    firstPoint: UInt32(first),
-                    fileIndex: 0
-                )
+            var batch = RasterBatch(
+                min: batchMin,
+                max: batchMax,
+                numPoints: UInt32(end - first),
+                firstPoint: UInt32(first),
+                fileIndex: 0
             )
+            var cumulative = [Int](repeating: 0, count: 8)
+            for pointIndex in first ..< end {
+                cumulative[Int(levels[pointIndex]) & 7] += 1
+            }
+            for level in 1 ..< 8 {
+                cumulative[level] += cumulative[level - 1]
+            }
+            batch.setLODCumulativeCounts(cumulative)
+            batches.append(batch)
             first = end
         }
 
@@ -142,6 +164,52 @@ public enum PackedPointCloudFixtures {
             orderedPositions: sortedPositions,
             sourceIndices: order.map { UInt32($0) }
         )
+    }
+}
+
+// Stable per-batch-slice 8-bucket counting sort by LOD level: within each
+// [first, first+batchStride) slice, points are reordered level-ascending while
+// preserving Morton order inside each level. The identical permutation is
+// applied to `order` so every array derived from it stays consistent with the
+// permuted positions/levels.
+private func bucketSortBatchSlicesByLevel(
+    order: inout [Int],
+    positions: inout [SIMD3<Float>],
+    levels: inout [UInt8],
+    batchStride: Int
+) {
+    let count = positions.count
+    var first = 0
+    while first < count {
+        let end = min(first + batchStride, count)
+
+        var cursors = [Int](repeating: 0, count: 9)
+        for i in first ..< end {
+            cursors[(Int(levels[i]) & 7) + 1] += 1
+        }
+        for level in 1 ..< 9 {
+            cursors[level] += cursors[level - 1]
+        }
+
+        // permutation[j] = source index (in the whole array) of the point
+        // that lands at slice-relative position j.
+        var permutation = [Int](repeating: 0, count: end - first)
+        for i in first ..< end {
+            let level = Int(levels[i]) & 7
+            permutation[cursors[level]] = i
+            cursors[level] += 1
+        }
+
+        let orderSlice = permutation.map { order[$0] }
+        let positionSlice = permutation.map { positions[$0] }
+        let levelSlice = permutation.map { levels[$0] }
+        for j in 0 ..< permutation.count {
+            order[first + j] = orderSlice[j]
+            positions[first + j] = positionSlice[j]
+            levels[first + j] = levelSlice[j]
+        }
+
+        first = end
     }
 }
 

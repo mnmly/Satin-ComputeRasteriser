@@ -6,11 +6,14 @@ import simd
 import Testing
 @testable import SatinComputeRasteriser
 
-// GPU pack() must be decode-identical to the CPU PackedPointCloudFixtures.pack:
-// same Morton order, same per-batch quantization, same LOD levels. These tests
-// pack the same input both ways and compare the *decoded* world positions
-// (within one quantization step) and LOD levels (exactly), reproducing the
-// rasteriser's scr_decodePointAt inverse on the CPU.
+// GPU pack() must produce the same per-batch point set as the CPU
+// PackedPointCloudFixtures.pack: same batch membership, same per-batch
+// quantization, same LOD levels. These tests pack the same input both ways and
+// compare the *decoded* world positions (within one quantization step) and LOD
+// levels, reproducing the rasteriser's scr_decodePointAt inverse on the CPU.
+// Comparisons are order-insensitive within a batch: since the LOD-bucketing
+// slice, the CPU pack stores batches level-ascending while the GPU packer
+// still emits pure Morton order (its bucketing lands in a later slice).
 
 private func makeContext() throws -> Context {
     let device = try #require(MTLCreateSystemDefaultDevice(), "test requires a Metal device")
@@ -118,19 +121,38 @@ private func sharedBuffer<T>(_ device: MTLDevice, _ array: [T]) -> MTLBuffer {
     let step = simd_reduce_max(cpuMax - cpuMin) / 1_073_741_824.0
     let tol = step * 4 // a few steps of slack for float-rounding differences
 
+    // CPU pack() now stores each batch level-ascending (LOD bucketing); the
+    // GPU packer keeps pure Morton order until its bucketing lands in a later
+    // slice. Compare order-insensitively within the batch instead of per
+    // index: lattice points are far apart relative to quantization error, so
+    // sorting both sides by decoded position pairs up identical source points
+    // — positions must then match within tolerance and levels exactly.
+    var cpuPoints: [(pos: SIMD3<Float>, level: UInt8)] = []
+    var gpuPoints: [(pos: SIMD3<Float>, level: UInt8)] = []
+    for i in 0 ..< count {
+        cpuPoints.append((decode(low: cpu.xyzLow[i], med: cpu.xyzMed[i], high: cpu.xyzHigh[i],
+                                 level: cpu.levels[i], batchMin: cpuMin, batchMax: cpuMax),
+                          cpu.levels[i]))
+        gpuPoints.append((decode(low: gLow[i], med: gMed[i], high: gHigh[i],
+                                 level: gLevels[i], batchMin: gMin, batchMax: gMax),
+                          gLevels[i]))
+    }
+    let byPosition: ((pos: SIMD3<Float>, level: UInt8), (pos: SIMD3<Float>, level: UInt8)) -> Bool = {
+        ($0.pos.x, $0.pos.y, $0.pos.z) < ($1.pos.x, $1.pos.y, $1.pos.z)
+    }
+    cpuPoints.sort(by: byPosition)
+    gpuPoints.sort(by: byPosition)
+
     var levelMismatches = 0
     var maxPosErr: Float = 0
     for i in 0 ..< count {
-        let cpuPos = decode(low: cpu.xyzLow[i], med: cpu.xyzMed[i], high: cpu.xyzHigh[i],
-                            level: cpu.levels[i], batchMin: cpuMin, batchMax: cpuMax)
-        let gpuPos = decode(low: gLow[i], med: gMed[i], high: gHigh[i],
-                            level: gLevels[i], batchMin: gMin, batchMax: gMax)
-        maxPosErr = max(maxPosErr, simd_distance(cpuPos, gpuPos))
-        if cpu.levels[i] != gLevels[i] { levelMismatches += 1 }
+        maxPosErr = max(maxPosErr, simd_distance(cpuPoints[i].pos, gpuPoints[i].pos))
+        if cpuPoints[i].level != gpuPoints[i].level { levelMismatches += 1 }
     }
 
     #expect(maxPosErr <= tol, "max decoded position error \(maxPosErr) exceeded tol \(tol)")
-    // Distinct keys → identical sort order → levels must match exactly.
+    // Distinct keys → same point set with the same voxel-occupancy level
+    // assignment → per-point levels must match exactly once paired up.
     #expect(levelMismatches == 0, "\(levelMismatches)/\(count) LOD levels differed")
 }
 

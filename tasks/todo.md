@@ -315,3 +315,128 @@ should disappear from workers).
 3. Wire StreamingAdapter: raw path + per-frame batched async dispatch.
 4. End-to-end measure (Satin app/new harness) + parity on a real cloud + A/B.
 5. Flip default / document / version both packages.
+
+---
+
+# PLAN: LOD bucketing — per-batch level sort + prefix counts (2026-07-10)
+
+## Problem
+
+Points within a batch are Morton-ordered with LOD levels assigned afterwards
+(voxel occupancy), so fine/coarse points are interleaved. Every per-frame pass
+(depth, color, nearestDepth, nearestIndex) must read `levels[pointIndex]` and
+branch for EVERY point in every surviving batch, regardless of the CLOD
+threshold. At 500M+ resident points this per-point "should I skip" touch is
+the dominant count-proportional cost — it scales with resident points, not
+with what's actually drawn.
+
+## Mechanism
+
+Store each batch's points **level-ascending** (stable within a level, so
+Morton order is preserved inside each bucket) and record per-batch
+**cumulative level counts**. The cull pass then computes, per visible batch,
+the exact prefix length that can survive the current `lodThreshold`; the
+draw passes loop only over that prefix. The per-point dither test stays
+unchanged and authoritative *within* the prefix.
+
+- **Survivor bound (exactness argument)**: keep-test is
+  `dither < lodThreshold - pointLevel + 0.5` with `dither ∈ [0,1)`, so a point
+  can survive iff `pointLevel < lodThreshold + 0.5`. With levels ascending,
+  survivors are a subset of the prefix `cum[Lmax]`,
+  `Lmax = clamp(int(floor(lodThreshold + 0.5)), 0, 7)` (overshoots by at most
+  one level at exact-integer boundaries — safe, superset). Dither-off
+  (`dither = 0.5`) and CLOD-off (`lodThreshold = 99` → `Lmax = 7` → full
+  batch) both remain correct.
+- **Prefix encoding**: `cum[L]` = points with level ≤ L, 8 × uint16 packed
+  into `RasterBatch.padding3..padding6` (`padding3 = cum0 | cum1<<16`, …,
+  `padding6 = cum6 | cum7<<16`). Fits: `pointsPerBatch` defaults to 10240 and
+  must be asserted ≤ 65535 at pack time. `cum7 == numPoints > 0`, so
+  **`padding6 == 0` is the legacy sentinel**: unbucketed batch → fall back to
+  `activePoints = numPoints`. Old SwiftPDAL chunks + new renderer = current
+  behavior; new chunks + old renderer = padding ignored. Mixed pools fine
+  (sentinel is per batch).
+- **Cull**: compute `activePoints` per visible batch; write into
+  `VisibleBatch.padding` (rename → `activePoints`, stride unchanged). If
+  `activePoints == 0`, skip emitting the batch entirely (free extra cull).
+- **Draw passes** (depth/color/nearestDepth/nearestIndex):
+  `pointsPerThread = ceil(vb.activePoints / CR_THREADS_PER_GROUP)`, guard
+  `localIndex >= vb.activePoints`. No other logic changes.
+
+## Where the reorder happens — at the producers, never at upload
+
+Upload-time permutation is ruled out: `ResidentChunk.extraScalars` (and
+picking via chunk-relative indices) are consumed app-side in the same order
+as the packed buffers; permuting inside `addBatches` would silently break
+that contract. Three producers, each reorders + fills prefix words itself:
+
+1. **SwiftPDAL `ChunkPacker.pack`** (`~/Development-local/Personal/SwiftPDAL`,
+   `Sources/SwiftPDAL/Streaming/ChunkPacking.swift`) — the COPC streaming
+   path, primary workload. After `computeLODLevels` (line ~80), per
+   batch-slice stable 8-bucket counting sort; **compose the slice permutation
+   into `order`** before the colors/extraScalars gather loops so every
+   sidecar reorders consistently for free; permute `sortedPositions` +
+   `levels`; fill `StreamingRasterBatch.padding3..6` (fields already exist
+   and layout-mirror `RasterBatch` — no struct change, no protocol change).
+   Release (minor bump), then bump the pin in Satin-ComputeRasteriser
+   `Package.swift`.
+2. **Renderer CPU `pack()`** (`PackedPointCloudFixtures.swift`) — same
+   slice-local counting sort after `computeLODLevels`; permute
+   `sortedPositions`/`sortedColorsSrc`/`levels` and compose into `order` so
+   `sourceIndices`/`orderedPositions` stay consistent (picking + displacement
+   contracts preserved). Fill `RasterBatch.padding3..6`.
+3. **GPUPacker** — restage: move LOD (init/claim/assign) BEFORE
+   AABB/quantize (LOD depends only on `sortedPos` + global bounds), insert a
+   bucket-reorder stage permuting `sortedPos`/`colors`/`levels` (3 arrays,
+   pre-quantize), then AABB (permutation-invariant) → quantize as today; add
+   prefix-count write into `PackRasterBatch.p3..p6` (extend `packBatchAABB`
+   or a tiny follow-up kernel). Permutation scratch can reuse the radix
+   `keysA`/`indicesA` buffers (dead after the sort). **Stability within a
+   level is REQUIRED** — not for rendering correctness, but because the
+   parity tests compare per-index against the CPU pack; mirror the
+   radixScatter serial-per-tile trick (or serial-per-batch: pack is not
+   per-frame). `adoptGPUBatchBounds` mirror read-back must carry the padding
+   words through (verify after the dirty-range flush change lands).
+
+## Public API / docs
+
+`RasterBatch` fields are public — do NOT rename `padding3..8`. Add a
+documented helper (e.g. computed `lodCumulativeCounts: [UInt16]` + a setter
+used by the packers) with `///` docs per the DocC contract; `VisibleBatch.padding`
+→ `activePoints` IS a rename of a public field — check for external usage;
+if risky, add `activePoints` as a computed alias over `padding` instead.
+Update the layout comment in `Pipelines/GPUPacker/Shaders.metal`
+(`PackRasterBatch`) and the no-inline-comment-in-struct warning applies to
+any uniform struct edits.
+
+## Risks / notes
+
+- `hashUnit(pointIndex)` dither realization changes when points move index —
+  statistically identical pattern, but expect per-point sparkle diffs in
+  A/B screenshots; compare distributions, not pixels.
+- Batch AABB and 10/10/10 decode are per-point and order-independent —
+  reordering cannot affect decode precision.
+- Morton coherency across bucket boundaries drops slightly; within-bucket
+  order is preserved (stable sort). Plausibly *reduces* pixel-atomic
+  contention (neighboring lanes less likely to hit the same pixel). Measure,
+  don't assume.
+- Composes cleanly with the planned merged-cull-across-clouds change
+  (audit #2): `activePoints` rides in `VisibleBatch` either way.
+- NearestPointCPUReference: verify whether it replicates the LOD skip; if it
+  enumerates all points it is unaffected.
+
+## Phasing (thin slices, each shippable behind the sentinel)
+
+1. **Renderer core**: prefix helpers on `RasterBatch` + CPU `pack()`
+   bucketing + cull/draw kernel changes + sentinel fallback + tests
+   (levels-ascending assertion, prefix-vs-recount, cull `activePoints` vs
+   CPU reference across thresholds, CLOD-off/dither-off regression).
+   Wholesale clouds get the win immediately; streamed chunks hit the
+   sentinel → zero regression.
+2. **SwiftPDAL**: ChunkPacker bucketing + prefix fill + extraScalars-order
+   test; release; bump pin here. Streaming (the 500M-point path) gets the win.
+3. **GPUPacker**: stage reorder + bucket kernel + prefix write; parity tests
+   updated (CPU and GPU must share the same stable bucketing rule).
+4. **Measure**: Release example app on a real COPC workload, far/mid/near
+   viewpoints; Metal capture of depth+color pass GPU time + Time Profiler
+   before/after. Expect the win to scale with (resident points × how far the
+   threshold is below max level).
