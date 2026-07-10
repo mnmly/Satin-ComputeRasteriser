@@ -22,6 +22,9 @@ struct ColorPassUniforms {
     int applyDisplacement;
     int applyTint;
     int tintAlphaIsCoverage;
+    float motionBlur;
+    int motionBlurSamples;
+    float motionBlurMaxSpread;
 };
 
 kernel void colorPassUpdate(
@@ -37,6 +40,7 @@ kernel void colorPassUpdate(
     device const float3 *displacements [[buffer(ComputeBufferCustom8)]],
     device const uint *colors [[buffer(ComputeBufferCustom9)]],
     device const float4 *tints [[buffer(ComputeBufferCustom10)]],
+    device const float3 *prevDisplacements [[buffer(12)]],
     uint slot [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]]
 ) {
@@ -60,7 +64,8 @@ kernel void colorPassUpdate(
         if (dither >= lodThreshold - pointLevel + 0.5) {
             continue;
         }
-        float3 point = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
+        const float3 base = decodePoint(pointIndex, batch, xyzLow, xyzMed, xyzHigh, level);
+        float3 point = base;
         if (uniforms.applyDisplacement != 0) {
             point += displacements[pointIndex];
             // Cull sentinel: a displacement kernel sets a NaN displacement to drop
@@ -96,6 +101,11 @@ kernel void colorPassUpdate(
         uint b = (color >> 16) & 0xffu;
 
         const bool coverageMode = (uniforms.applyTint != 0 && uniforms.tintAlphaIsCoverage != 0);
+        const bool motionBlurOn = uniforms.motionBlur > 0.0;
+        // OIT accumulation path (Σcolour·α, Σα, no depth test) is used by BOTH
+        // translucent defocus AND motion blur — the smear sweeps a splat across
+        // pixels and overlaps must blend, which the weighted-blend gives for free.
+        const bool oit = coverageMode || motionBlurOn;
         float coverage = 1.0;
         if (uniforms.applyTint != 0) {
             const float4 tint = tints[pointIndex];
@@ -118,29 +128,11 @@ kernel void colorPassUpdate(
                 b = uint(saturate(mixed.z) * 255.0 + 0.5);
             }
         }
-        // Per-point accumulation.
-        //  Coverage (translucent-defocus) mode → weighted-blended OIT: accumulate
-        //  Σ(colour·α) and Σα with NO depth test, so focus→defocus is a true blend
-        //  with no hard occlusion edge. (Stored fixed-point — see below.)
-        //  Otherwise → the original uint colour sum + count, depth-tested.
-        //
-        //  PERF: coverage mode drops the front-surface early-out, so EVERY point in
-        //  EVERY footprint pixel issues these atomic adds — cost scales with
-        //  view-dependent OVERDRAW (all depth layers along the ray), not just the
-        //  visible surface. On dense/deep clouds that is several× more atomic
-        //  traffic, and the dominant cost is atomic CONTENTION on the pixel buffer
-        //  (same addresses hammered). Tune via the streaming LOD budget + point
-        //  size; opaque mode keeps the depth-tested early-out below. A screen-space
-        //  post-process DoF would instead be O(pixels), independent of overdraw.
-        const float a = coverage;                 // 1 = opaque (in focus), → 0 = defocused
-        if (coverageMode && a <= 0.0) { continue; } // fully transparent → contributes nothing
-        // Fixed-point + uint atomics (float atomics are a silent no-op on this path):
-        //   red/green/blue ← Σ(colour·α·S)   count ← Σ(α·S),  S = 4096.
-        const float kS = 4096.0;
-        const uint caR = uint(float(r) * (1.0 / 255.0) * a * kS + 0.5);
-        const uint caG = uint(float(g) * (1.0 / 255.0) * a * kS + 0.5);
-        const uint caB = uint(float(b) * (1.0 / 255.0) * a * kS + 0.5);
-        const uint caA = uint(a * kS + 0.5);
+        // Per-point accumulation: OIT (Σcolour·α / Σα, no depth test) when defocus
+        // or motion blur is on, else the original depth-tested uint colour sum.
+        const float a = coverage;
+        if (oit && a <= 0.0) { continue; }
+
         const int radius = pointFootprintRadius(
             point, file,
             uniforms.viewMatrix, uniforms.projectionMatrix, uniforms.screenSize,
@@ -148,42 +140,76 @@ kernel void colorPassUpdate(
             uniforms.minimumPointSize, uniforms.maximumPointSize, uniforms.pointSizeScale
         );
 
-        for (int oy = -radius; oy <= radius; oy++) {
-            for (int ox = -radius; ox <= radius; ox++) {
-                const int2 offset = int2(ox, oy);
-                if (!insidePointFootprint(offset, radius)) {
-                    continue;
+        // Motion blur: sweep the splat from the point's current screen position
+        // back toward its previous one (camera + displacement velocity), splitting
+        // energy 1/N across the samples so total contribution is conserved.
+        int mbSamples = 1;
+        float2 mbStep = float2(0.0);
+        if (motionBlurOn) {
+            float3 prevPoint = base;
+            if (uniforms.applyDisplacement != 0) { prevPoint += prevDisplacements[pointIndex]; }
+            const float4 prevClip = file.prevTransform * float4(prevPoint, 1.0);
+            if (prevClip.w > 0.0) {
+                const float3 prevNdc = prevClip.xyz / prevClip.w;
+                int2 prevPixel = int2((prevNdc.xy * 0.5 + 0.5) * float2(uniforms.screenSize));
+                prevPixel.y = uniforms.screenSize.y - 1 - prevPixel.y;
+                float2 vel = float2(pixelCoord - prevPixel) * uniforms.motionBlur;
+                float len = length(vel);
+                if (len > uniforms.motionBlurMaxSpread) { vel *= uniforms.motionBlurMaxSpread / len; len = uniforms.motionBlurMaxSpread; }
+                if (len > 0.75) {
+                    mbSamples = clamp(int(ceil(len)), 1, uniforms.motionBlurSamples);
+                    mbStep = vel / float(max(mbSamples - 1, 1));
                 }
+            }
+        }
 
-                const int2 target = pixelCoord + offset;
-                if (target.x < 0 || target.x >= uniforms.screenSize.x || target.y < 0 || target.y >= uniforms.screenSize.y) {
-                    continue;
+        // Fixed-point + uint atomics; energy split across the mbSamples smear taps.
+        const float aN = a / float(mbSamples);
+        const float kS = 4096.0;
+        const uint caR = uint(float(r) * (1.0 / 255.0) * aN * kS + 0.5);
+        const uint caG = uint(float(g) * (1.0 / 255.0) * aN * kS + 0.5);
+        const uint caB = uint(float(b) * (1.0 / 255.0) * aN * kS + 0.5);
+        const uint caA = uint(aN * kS + 0.5);
+
+        for (int s = 0; s < mbSamples; s++) {
+            const int2 center = pixelCoord - int2(round(mbStep * float(s)));
+            for (int oy = -radius; oy <= radius; oy++) {
+                for (int ox = -radius; ox <= radius; ox++) {
+                    const int2 offset = int2(ox, oy);
+                    if (!insidePointFootprint(offset, radius)) {
+                        continue;
+                    }
+
+                    const int2 target = center + offset;
+                    if (target.x < 0 || target.x >= uniforms.screenSize.x || target.y < 0 || target.y >= uniforms.screenSize.y) {
+                        continue;
+                    }
+
+                    const uint pixelIndex = uint(target.y * uniforms.screenSize.x + target.x);
+
+                    if (oit) {
+                        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red,   caR, memory_order_relaxed);
+                        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, caG, memory_order_relaxed);
+                        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue,  caB, memory_order_relaxed);
+                        atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, caA, memory_order_relaxed);
+                        continue;
+                    }
+
+                    const uint closestDepthUint = pixels[pixelIndex].depth;
+                    if (closestDepthUint == 0u) {
+                        continue;
+                    }
+                    const float closestDepth = uintToDepthReverseZ(closestDepthUint);
+                    const bool visible = ndc.z >= closestDepth * (1.0 - uniforms.depthTolerance);
+                    if (!visible) {
+                        continue;
+                    }
+
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red, r, memory_order_relaxed);
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, g, memory_order_relaxed);
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue, b, memory_order_relaxed);
+                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, 1u, memory_order_relaxed);
                 }
-
-                const uint pixelIndex = uint(target.y * uniforms.screenSize.x + target.x);
-
-                if (coverageMode) {
-                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red,   caR, memory_order_relaxed);
-                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, caG, memory_order_relaxed);
-                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue,  caB, memory_order_relaxed);
-                    atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, caA, memory_order_relaxed);
-                    continue;
-                }
-
-                const uint closestDepthUint = pixels[pixelIndex].depth;
-                if (closestDepthUint == 0u) {
-                    continue;
-                }
-                const float closestDepth = uintToDepthReverseZ(closestDepthUint);
-                const bool visible = ndc.z >= closestDepth * (1.0 - uniforms.depthTolerance);
-                if (!visible) {
-                    continue;
-                }
-
-                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].red, r, memory_order_relaxed);
-                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].green, g, memory_order_relaxed);
-                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].blue, b, memory_order_relaxed);
-                atomic_fetch_add_explicit((device atomic_uint *)&pixels[pixelIndex].count, 1u, memory_order_relaxed);
             }
         }
     }

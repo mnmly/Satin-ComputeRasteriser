@@ -93,6 +93,15 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// `ComputeRasteriserConfiguration.applyDisplacement == true`.
     public var displacementBuffer: MTLBuffer?
 
+    /// Previous frame's `displacementBuffer`, held for motion blur so the color
+    /// pass can compute per-point displacement velocity. Keyed by the rendering
+    /// camera's `ObjectIdentifier` so STEREO keeps one per eye (each eye renders
+    /// in its own drained command buffer and snapshots its own copy). The
+    /// rasteriser blits `displacementBuffer → prevDisplacementBuffers[cam]` at the
+    /// end of each frame (only while `configuration.motionBlur > 0`). Bound at raw
+    /// buffer index 12 on the color pass (an otherwise-unused compute slot).
+    public var prevDisplacementBuffers: [ObjectIdentifier: MTLBuffer] = [:]
+
     /// Optional per-point color tint (one `float4` per slot-pool point,
     /// stride 16 bytes). Bound at `Custom10` on the color pass when
     /// `ComputeRasteriserConfiguration.applyTint == true`. The color pass
@@ -469,7 +478,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     public func updateFiles(
         viewProjection: simd_float4x4,
         modelMatrix: simd_float4x4,
-        frustumTransform: simd_float4x4? = nil
+        frustumTransform: simd_float4x4? = nil,
+        prevViewProjection: simd_float4x4? = nil
     ) {
         guard !files.isEmpty, let filesBuffer else { return }
         var snapshot = files
@@ -478,6 +488,10 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             snapshot[index].transform = viewProjection * world
             snapshot[index].transformFrustum = (frustumTransform ?? viewProjection) * world
             snapshot[index].world = world
+            // Previous-frame MVP for motion-blur velocity. Uses the current world
+            // (objects are effectively static frame-to-frame; camera motion, the
+            // dominant term, comes from prevViewProjection).
+            snapshot[index].prevTransform = (prevViewProjection ?? viewProjection) * world
         }
 
         filesSlotIndex = (filesSlotIndex + 1) % Self.filesBufferSlotCount

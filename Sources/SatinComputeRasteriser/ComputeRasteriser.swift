@@ -235,7 +235,11 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         // weighted-blends every point with no depth test, and the resolve composites
         // Σ(c·α)/Σα with alpha 1−e^(−Σα). See ComputeRasteriserConfiguration.
         // tintAlphaIsCoverage for the mechanism + the overdraw-scaling perf cost.
-        let coverage = configuration.applyTint && configuration.tintAlphaIsCoverage
+        // Motion blur also uses the coverage/OIT accumulate + resolve path (it
+        // sweeps each splat across its screen-space velocity, blending overlaps),
+        // so enable coverage when EITHER translucent defocus OR motion blur is on.
+        let motionBlurOn = configuration.motionBlur > 0
+        let coverage = (configuration.applyTint && configuration.tintAlphaIsCoverage) || motionBlurOn
         depthProcessor.applyTint = configuration.applyTint
         depthProcessor.tintAlphaIsCoverage = configuration.tintAlphaIsCoverage
         colorProcessor.tintAlphaIsCoverage = configuration.tintAlphaIsCoverage
@@ -244,11 +248,31 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         colorProcessor.depthTolerance = configuration.depthTolerance
         colorProcessor.colorizeChunks = configuration.colorizeChunks
         colorProcessor.colorizeOverdraw = configuration.colorizeOverdraw
+        colorProcessor.motionBlur = configuration.motionBlur
+        colorProcessor.motionBlurSamples = configuration.motionBlurSamples
+        colorProcessor.motionBlurMaxSpread = configuration.motionBlurMaxSpread
 
+        // Previous-frame view-projection for motion-blur velocity, keyed by camera
+        // so STEREO stays correct: each eye renders with its own (stable) camera in
+        // its own drained command buffer, so per-eye prev state must not collide.
+        // Falls back to the current VP the first time a camera is seen (→ zero
+        // camera velocity that frame).
+        let camKey = ObjectIdentifier(camera)
+        currentCameraKey = camKey
+        let prevVP = previousViewProjection[camKey] ?? viewProjection
         for cloud in visiblePointClouds {
-            cloud.updateFiles(viewProjection: viewProjection, modelMatrix: cloud.worldMatrix)
+            cloud.updateFiles(viewProjection: viewProjection, modelMatrix: cloud.worldMatrix,
+                              prevViewProjection: prevVP)
         }
+        previousViewProjection[camKey] = viewProjection
     }
+
+    /// Last frame's `projection · view` per camera (stereo has one per eye), for
+    /// motion-blur camera velocity.
+    private var previousViewProjection: [ObjectIdentifier: simd_float4x4] = [:]
+    /// The camera key from the most recent `update`, used by `encode` to pick the
+    /// matching per-eye previous-displacement buffer.
+    private var currentCameraKey: ObjectIdentifier?
 
     public override func encode(_ commandBuffer: MTLCommandBuffer) {
         guard visible,
@@ -344,6 +368,10 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
             bindDisplacement(cloud, to: colorProcessor)
             bindTint(cloud, to: colorProcessor)
             colorProcessor.colorsBuffer = cloud.colorsBuffer
+            // Previous-frame displacement for motion-blur velocity, keyed per eye
+            // (nil until the first end-of-frame copy → the processor stands in the
+            // current one, i.e. zero displacement velocity that frame).
+            colorProcessor.prevDisplacementBuffer = currentCameraKey.flatMap { cloud.prevDisplacementBuffers[$0] }
             colorProcessor.update(commandBuffer)
         }
 
@@ -351,6 +379,38 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         resolveProcessor.outputTexture = outputTexture
         resolveProcessor.depthTexture = depthTexture
         resolveProcessor.update(commandBuffer)
+
+        // After the color pass has consumed this frame's + last frame's
+        // displacement, snapshot this frame's into each cloud's prev buffer so
+        // next frame sees it. Only while motion blur is on (else it's wasted work).
+        if configuration.motionBlur > 0 {
+            snapshotDisplacementForMotionBlur(culledClouds, commandBuffer: commandBuffer)
+        }
+    }
+
+    /// Blit-copy each cloud's current `displacementBuffer` into its
+    /// `prevDisplacementBuffer` (lazily allocated / resized to match), so the next
+    /// frame's color pass can compute per-point displacement velocity.
+    private func snapshotDisplacementForMotionBlur(
+        _ clouds: [ComputeRasteriserPointCloud],
+        commandBuffer: MTLCommandBuffer
+    ) {
+        // Per-eye key: each eye snapshots into its own prev buffer, so the two
+        // eyes' end-of-frame copies never clobber each other (they render in
+        // separate, drained command buffers).
+        guard let key = currentCameraKey else { return }
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        blit.label = "MotionBlur.DisplacementSnapshot"
+        for cloud in clouds {
+            guard let src = cloud.displacementBuffer else { continue }
+            if cloud.prevDisplacementBuffers[key]?.length != src.length {
+                cloud.prevDisplacementBuffers[key] = cloud.makeDisplacementBuffer(
+                    storage: .private, label: "\(cloud.label).PrevDisplacement")
+            }
+            guard let dst = cloud.prevDisplacementBuffers[key] else { continue }
+            blit.copy(from: src, sourceOffset: 0, to: dst, destinationOffset: 0, size: src.length)
+        }
+        blit.endEncoding()
     }
 
     private func encodeNearestPoint(_ commandBuffer: MTLCommandBuffer) {

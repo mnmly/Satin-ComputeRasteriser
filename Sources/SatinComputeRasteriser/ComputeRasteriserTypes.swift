@@ -83,6 +83,17 @@ public struct ComputeRasteriserConfiguration: Sendable {
     /// always-on-top overlay (e.g. a composite pass with no depth attachment).
     public var writesSceneDepth: Bool
 
+    /// Motion-blur shutter strength. 0 = off. Scales each point's screen-space
+    /// velocity (camera + displacement) into a smear length; the color pass
+    /// sweeps the splat across the swept path (coverage/OIT accumulation), so
+    /// enabling it also routes the resolve through the coverage path (the cloud
+    /// composites as weighted-blended-OIT while blur is on).
+    public var motionBlur: Float
+    /// Maximum sub-samples swept along the velocity vector (energy split 1/N).
+    public var motionBlurSamples: Int
+    /// Clamp on the smear length in pixels (caps cost + runaway blur).
+    public var motionBlurMaxSpread: Float
+
     public init(
         mode: ComputeRasteriserMode = .highQualityAverage,
         depthTolerance: Float = 0.01,
@@ -101,7 +112,10 @@ public struct ComputeRasteriserConfiguration: Sendable {
         applyDisplacement: Bool = false,
         applyTint: Bool = false,
         tintAlphaIsCoverage: Bool = false,
-        writesSceneDepth: Bool = true
+        writesSceneDepth: Bool = true,
+        motionBlur: Float = 0.0,
+        motionBlurSamples: Int = 8,
+        motionBlurMaxSpread: Float = 64.0
     ) {
         self.mode = mode
         self.depthTolerance = depthTolerance
@@ -121,6 +135,9 @@ public struct ComputeRasteriserConfiguration: Sendable {
         self.applyTint = applyTint
         self.tintAlphaIsCoverage = tintAlphaIsCoverage
         self.writesSceneDepth = writesSceneDepth
+        self.motionBlur = motionBlur
+        self.motionBlurSamples = motionBlurSamples
+        self.motionBlurMaxSpread = motionBlurMaxSpread
     }
 }
 
@@ -173,7 +190,10 @@ public struct RasterFile: Sendable {
     public var transform: simd_float4x4
     public var transformFrustum: simd_float4x4
     public var world: simd_float4x4
-    public var padding: simd_float4x4
+    /// Previous frame's `transform` (view-projection · world), filled by
+    /// `updateFiles`. Used by the color pass to compute per-point screen-space
+    /// velocity for motion blur. (Formerly reserved `padding`.)
+    public var prevTransform: simd_float4x4
 
     public init(
         transform: simd_float4x4 = matrix_identity_float4x4,
@@ -183,7 +203,7 @@ public struct RasterFile: Sendable {
         self.transform = transform
         self.transformFrustum = transformFrustum
         self.world = world
-        self.padding = matrix_identity_float4x4
+        self.prevTransform = transform
     }
 }
 

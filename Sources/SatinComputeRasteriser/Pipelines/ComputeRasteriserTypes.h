@@ -31,7 +31,7 @@ typedef struct {
     float4x4 transform;
     float4x4 transformFrustum;
     float4x4 world;
-    float4x4 padding;
+    float4x4 prevTransform;
 } RasterFile;
 
 typedef struct {
