@@ -4,11 +4,13 @@
 // compute_rasterizer (Schuetz et al.) and the Magnopus point-cloud write-up.
 #include "../Common.metal"
 
+// batchCount is per-cloud (per dispatch), so it lives at Custom4 via setBytes
+// instead of in CullUniforms: every cloud's dispatch in a frame shares one
+// uniform ring slot, which must therefore hold only per-frame values.
 struct CullUniforms {
     int2 screenSize;
     float4x4 viewMatrix;
     float4x4 projectionMatrix;
-    int batchCount;
     int enableFrustumCulling;
     int lodBias;
     int enableCLOD;
@@ -20,9 +22,10 @@ kernel void cullUpdate(
     device const RasterFile *files [[buffer(ComputeBufferCustom1)]],
     device VisibleBatch *visible [[buffer(ComputeBufferCustom2)]],
     device atomic_uint *counter [[buffer(ComputeBufferCustom3)]],
+    constant int &batchCount [[buffer(ComputeBufferCustom4)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    if (gid >= uint(uniforms.batchCount)) {
+    if (gid >= uint(batchCount)) {
         return;
     }
 

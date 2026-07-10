@@ -7,14 +7,19 @@ open class BaseComputeRasteriserProcessor: ComputeProcessor {
     /// after the standard `computeBuffers` binding, which always uses offset 0).
     open func applyAdditionalBindings(_ computeEncoder: MTLComputeCommandEncoder) {}
 
-    func encodeIfReady(_ commandBuffer: MTLCommandBuffer, isReady: Bool, configure: (MTLComputeCommandEncoder, MTLComputePipelineState) -> Void = { _, _ in }) {
-        guard isReady,
-              let pipeline = updatePipeline,
-              let computeEncoder = commandBuffer.makeComputeCommandEncoder()
-        else { return }
-
-        update()
-        computeEncoder.label = label
+    /// Encode one dispatch into a caller-owned encoder: pipeline state, uniform
+    /// slot, buffer/texture bindings, ``applyAdditionalBindings(_:)``,
+    /// `configure`, `preCompute`, dispatch. Does **not** create/end the encoder
+    /// and does **not** call `update()` — the caller advances the uniform ring
+    /// exactly once per frame before its dispatch loop, so every dispatch
+    /// sharing the encoder reads the same uniform slot. Per-dispatch values must
+    /// therefore be raw buffer bindings or `setBytes`, never uniform parameters.
+    func encode(
+        into computeEncoder: MTLComputeCommandEncoder,
+        isReady: Bool = true,
+        configure: (MTLComputeCommandEncoder, MTLComputePipelineState) -> Void = { _, _ in }
+    ) {
+        guard isReady, let pipeline = updatePipeline else { return }
         computeEncoder.setComputePipelineState(pipeline)
         bindUniforms(computeEncoder)
         bindAllBuffers(computeEncoder)
@@ -23,6 +28,20 @@ open class BaseComputeRasteriserProcessor: ComputeProcessor {
         configure(computeEncoder, pipeline)
         preCompute?(computeEncoder, 0)
         dispatchThreads(computeEncoder: computeEncoder, pipeline: pipeline, iteration: 0)
+    }
+
+    /// Single-dispatch convenience: makes its own compute encoder, advances the
+    /// uniform ring via `update()`, encodes through ``encode(into:isReady:configure:)``,
+    /// and ends the encoder.
+    func encodeIfReady(_ commandBuffer: MTLCommandBuffer, isReady: Bool, configure: (MTLComputeCommandEncoder, MTLComputePipelineState) -> Void = { _, _ in }) {
+        guard isReady,
+              updatePipeline != nil,
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder()
+        else { return }
+
+        update()
+        computeEncoder.label = label
+        encode(into: computeEncoder, isReady: isReady, configure: configure)
         computeEncoder.endEncoding()
     }
 

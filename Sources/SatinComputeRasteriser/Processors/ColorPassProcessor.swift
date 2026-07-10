@@ -58,19 +58,11 @@ open class ColorPassProcessor: DepthPassProcessor {
         set("motionBlurMaxSpread", motionBlurMaxSpread)
     }
 
+    override var isEncodeReady: Bool {
+        super.isEncodeReady && colorsBuffer != nil
+    }
+
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
-        encodeIfReady(
-            commandBuffer,
-            isReady: screenSize.x > 0
-                && screenSize.y > 0
-                && batchesBuffer != nil
-                && colorsBuffer != nil
-                && pixelBuffer != nil
-                && levelsBuffer != nil
-                && visibleBatchesBuffer != nil
-                && displacementBuffer != nil
-                && tintBuffer != nil
-                && indirectArgsBuffer != nil
-        )
+        encodeIfReady(commandBuffer, isReady: isEncodeReady)
     }
 }

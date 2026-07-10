@@ -5,11 +5,12 @@ open class CullFinalizeProcessor: BaseComputeRasteriserProcessor {
     public var counterBuffer: MTLBuffer? { didSet { set(counterBuffer, index: .Custom0) } }
     public var indirectArgsBuffer: MTLBuffer? { didSet { set(indirectArgsBuffer, index: .Custom1) } }
 
+    var isEncodeReady: Bool {
+        counterBuffer != nil && indirectArgsBuffer != nil
+    }
+
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
-        encodeIfReady(
-            commandBuffer,
-            isReady: counterBuffer != nil && indirectArgsBuffer != nil
-        )
+        encodeIfReady(commandBuffer, isReady: isEncodeReady)
     }
 
 #if os(macOS) || os(iOS) || os(visionOS)

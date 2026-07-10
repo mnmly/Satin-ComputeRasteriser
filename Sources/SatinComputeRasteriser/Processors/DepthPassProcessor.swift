@@ -96,19 +96,20 @@ open class DepthPassProcessor: BaseComputeRasteriserProcessor {
         set("tintAlphaIsCoverage", tintAlphaIsCoverage ? 1 : 0)
     }
 
+    var isEncodeReady: Bool {
+        screenSize.x > 0
+            && screenSize.y > 0
+            && batchesBuffer != nil
+            && pixelBuffer != nil
+            && levelsBuffer != nil
+            && visibleBatchesBuffer != nil
+            && displacementBuffer != nil
+            && tintBuffer != nil
+            && indirectArgsBuffer != nil
+    }
+
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
-        encodeIfReady(
-            commandBuffer,
-            isReady: screenSize.x > 0
-                && screenSize.y > 0
-                && batchesBuffer != nil
-                && pixelBuffer != nil
-                && levelsBuffer != nil
-                && visibleBatchesBuffer != nil
-                && displacementBuffer != nil
-                && tintBuffer != nil
-                && indirectArgsBuffer != nil
-        )
+        encodeIfReady(commandBuffer, isReady: isEncodeReady)
     }
 
 #if os(macOS) || os(iOS) || os(visionOS)

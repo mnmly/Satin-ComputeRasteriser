@@ -282,11 +282,14 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
               Int(viewport.w) > 0
         else { return }
 
+        // One scene-graph walk per encode; every consumer below shares it.
+        let clouds = visiblePointClouds
+
         switch configuration.mode {
         case .highQualityAverage:
-            encodeHighQualityAverage(commandBuffer, pixelBuffer: pixelBuffer)
+            encodeHighQualityAverage(commandBuffer, pixelBuffer: pixelBuffer, clouds: clouds)
         case .nearestPoint:
-            encodeNearestPoint(commandBuffer)
+            encodeNearestPoint(commandBuffer, clouds: clouds)
         }
 
         encodeHoleFill(commandBuffer)
@@ -316,20 +319,23 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         holeFillResultTexture = src
     }
 
-    private func encodeHighQualityAverage(_ commandBuffer: MTLCommandBuffer, pixelBuffer: MTLBuffer) {
+    private func encodeHighQualityAverage(
+        _ commandBuffer: MTLCommandBuffer,
+        pixelBuffer: MTLBuffer,
+        clouds: [ComputeRasteriserPointCloud]
+    ) {
         clearProcessor.pixelBuffer = pixelBuffer
         clearProcessor.pixelCount = Int(viewport.z) * Int(viewport.w)
         clearProcessor.update(commandBuffer)
+
+        let residentClouds = clouds.filter { $0.residentBatchCount > 0 }
 
         // When displacement/tint is globally on, clouds without their own buffer
         // must read zeros (not xyzLow garbage). Prepare a shared zeroed stand-in
         // sized to the largest drawable cloud so every cloud's reads are in-bounds.
         currentStandIn = nil
         if configuration.applyDisplacement || configuration.applyTint {
-            let maxPoints = visiblePointClouds
-                .filter { $0.residentBatchCount > 0 }
-                .map { $0.capacity.maxResidentPoints }
-                .max() ?? 0
+            let maxPoints = residentClouds.map { $0.capacity.maxResidentPoints }.max() ?? 0
             if maxPoints > 0 {
                 currentStandIn = zeroStandIn(forPoints: maxPoints, commandBuffer: commandBuffer)
             }
@@ -346,33 +352,94 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         // depth per pixel; only then does any colour accumulate. Occlusion is
         // therefore a pure function of depth, independent of cloud order.
         //
-        // The cull/visible/indirect-args buffers are per-cloud, so each cloud
-        // keeps its phase-1 cull result for phase 2. Metal's automatic hazard
-        // tracking on the shared (private) pixelBuffer serialises the two
-        // phases — same guarantee the per-cloud depth→color ordering already
-        // relied on. Pass counts are unchanged: cull+depth+color once each.
-        var culledClouds: [ComputeRasteriserPointCloud] = []
-        for cloud in visiblePointClouds where cloud.residentBatchCount > 0 {
-            guard runCullPass(commandBuffer, cloud: cloud) else { continue }
-
-            bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
-            bindDisplacement(cloud, to: depthProcessor)
-            bindTint(cloud, to: depthProcessor)
-            depthProcessor.update(commandBuffer)
-
-            culledClouds.append(cloud)
+        // Each phase (cull-reset blit, cull, cull-finalize, depth, color)
+        // encodes EVERY cloud into one shared encoder — the compute phases as
+        // `.concurrent` encoders. Encoders execute in submission order and
+        // encoder boundaries still order tracked resources across encoders, so
+        // cull → finalize (counter reads), finalize → depth (indirect args) and
+        // depth → color (settled depth reads) remain correct. WITHIN a
+        // concurrent encoder there are no implicit barriers — deliberately, so
+        // cloud N no longer serialises against cloud N+1 on the shared
+        // pixelBuffer — and that is safe: cull/finalize dispatches write
+        // per-cloud disjoint buffers, depth dispatches only `atomic_fetch_max`
+        // the shared pixel depth, and color dispatches only atomically add
+        // colour/count words while reading depth words finalized in the prior
+        // encoder. Pass counts are unchanged: cull+depth+color once each. Each
+        // processor's uniform ring advances ONCE per phase (`update()`), so all
+        // of a phase's dispatches share that slot — per-cloud values must be
+        // buffer bindings or setBytes, never uniform parameters.
+        let culledClouds = residentClouds.filter {
+            $0.visibleBatchesBuffer != nil
+                && $0.cullCounterBuffer != nil
+                && $0.cullIndirectArgsBuffer != nil
         }
 
-        for cloud in culledClouds {
-            bind(cloud, to: colorProcessor, pixelBuffer: pixelBuffer)
-            bindDisplacement(cloud, to: colorProcessor)
-            bindTint(cloud, to: colorProcessor)
-            colorProcessor.colorsBuffer = cloud.colorsBuffer
-            // Previous-frame displacement for motion-blur velocity, keyed per eye
-            // (nil until the first end-of-frame copy → the processor stands in the
-            // current one, i.e. zero displacement velocity that frame).
-            colorProcessor.prevDisplacementBuffer = currentCameraKey.flatMap { cloud.prevDisplacementBuffers[$0] }
-            colorProcessor.update(commandBuffer)
+        if !culledClouds.isEmpty {
+            if let blit = commandBuffer.makeBlitCommandEncoder() {
+                blit.label = "\(label).CullReset"
+                for cloud in culledClouds {
+                    guard let counterBuffer = cloud.cullCounterBuffer,
+                          let indirectArgsBuffer = cloud.cullIndirectArgsBuffer else { continue }
+                    blit.fill(buffer: counterBuffer, range: 0 ..< counterBuffer.length, value: 0)
+                    blit.fill(buffer: indirectArgsBuffer, range: 0 ..< indirectArgsBuffer.length, value: 0)
+                }
+                blit.endEncoding()
+            }
+
+            if let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) {
+                encoder.label = "\(label).Cull"
+                cullProcessor.update()
+                for cloud in culledClouds {
+                    cullProcessor.batchCount = cloud.batchCount
+                    cullProcessor.batchesBuffer = cloud.batchesBuffer
+                    cullProcessor.filesBuffer = cloud.filesBuffer
+                    cullProcessor.filesBufferOffset = cloud.filesBufferOffset
+                    cullProcessor.visibleBuffer = cloud.visibleBatchesBuffer
+                    cullProcessor.counterBuffer = cloud.cullCounterBuffer
+                    cullProcessor.encode(into: encoder, isReady: cullProcessor.isEncodeReady)
+                }
+                encoder.endEncoding()
+            }
+
+            if let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) {
+                encoder.label = "\(label).CullFinalize"
+                cullFinalizeProcessor.update()
+                for cloud in culledClouds {
+                    cullFinalizeProcessor.counterBuffer = cloud.cullCounterBuffer
+                    cullFinalizeProcessor.indirectArgsBuffer = cloud.cullIndirectArgsBuffer
+                    cullFinalizeProcessor.encode(into: encoder, isReady: cullFinalizeProcessor.isEncodeReady)
+                }
+                encoder.endEncoding()
+            }
+
+            if let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) {
+                encoder.label = "\(label).Depth"
+                depthProcessor.update()
+                for cloud in culledClouds {
+                    bind(cloud, to: depthProcessor, pixelBuffer: pixelBuffer)
+                    bindDisplacement(cloud, to: depthProcessor)
+                    bindTint(cloud, to: depthProcessor)
+                    depthProcessor.encode(into: encoder, isReady: depthProcessor.isEncodeReady)
+                }
+                encoder.endEncoding()
+            }
+
+            if let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) {
+                encoder.label = "\(label).Color"
+                colorProcessor.update()
+                for cloud in culledClouds {
+                    bind(cloud, to: colorProcessor, pixelBuffer: pixelBuffer)
+                    bindDisplacement(cloud, to: colorProcessor)
+                    bindTint(cloud, to: colorProcessor)
+                    colorProcessor.colorsBuffer = cloud.colorsBuffer
+                    // Previous-frame displacement for motion-blur velocity, keyed per eye
+                    // (nil until the first end-of-frame copy → the processor stands in the
+                    // current one, i.e. zero displacement velocity that frame).
+                    colorProcessor.prevDisplacementBuffer = currentCameraKey.flatMap { cloud.prevDisplacementBuffers[$0] }
+                    colorProcessor.encode(into: encoder, isReady: colorProcessor.isEncodeReady)
+                }
+                encoder.endEncoding()
+            }
         }
 
         resolveProcessor.pixelBuffer = pixelBuffer
@@ -413,10 +480,10 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         blit.endEncoding()
     }
 
-    private func encodeNearestPoint(_ commandBuffer: MTLCommandBuffer) {
+    private func encodeNearestPoint(_ commandBuffer: MTLCommandBuffer, clouds: [ComputeRasteriserPointCloud]) {
         guard let nearestDepthBuffer,
               let nearestIndexBuffer,
-              let cloud = visiblePointClouds.first(where: { $0.residentBatchCount > 0 })
+              let cloud = clouds.first(where: { $0.residentBatchCount > 0 })
         else { return }
 
         guard encodeNearestIndexPass(commandBuffer, cloud: cloud) else { return }
@@ -454,6 +521,9 @@ public final class ComputeRasteriser: Object, @unchecked Sendable {
         return true
     }
 
+    // Single-cloud cull (reset blit + cull + finalize), used by the nearest-point
+    // and pick paths only — the HQ-average path merges these per phase across all
+    // clouds in `encodeHighQualityAverage`.
     private func runCullPass(_ commandBuffer: MTLCommandBuffer, cloud: ComputeRasteriserPointCloud) -> Bool {
         guard let visibleBuffer = cloud.visibleBatchesBuffer,
               let counterBuffer = cloud.cullCounterBuffer,

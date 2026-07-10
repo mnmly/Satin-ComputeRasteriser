@@ -3,9 +3,11 @@ import Satin
 import simd
 
 open class CullProcessor: BaseComputeRasteriserProcessor {
-    public var batchCount: Int = 0 {
-        didSet { set("batchCount", batchCount) }
-    }
+    /// Number of batch slots the cull kernel scans, and the dispatch width.
+    /// Per-cloud, so it is bound per dispatch via `setBytes` (Custom4) in
+    /// ``applyAdditionalBindings(_:)`` — never through the uniform struct,
+    /// whose single per-frame slot is shared by every cloud's dispatch.
+    public var batchCount: Int = 0
 
     public var screenSize: SIMD2<UInt32> = .zero {
         didSet { set("screenSize", simd_int2(Int32(screenSize.x), Int32(screenSize.y))) }
@@ -44,6 +46,8 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
         if let filesBuffer {
             computeEncoder.setBuffer(filesBuffer, offset: filesBufferOffset, index: ComputeBufferIndex.Custom1.rawValue)
         }
+        var count = Int32(batchCount)
+        computeEncoder.setBytes(&count, length: MemoryLayout<Int32>.stride, index: ComputeBufferIndex.Custom4.rawValue)
     }
 
     public var visibleBuffer: MTLBuffer? { didSet { set(visibleBuffer, index: .Custom2) } }
@@ -51,7 +55,6 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
 
     open override func setup() {
         super.setup()
-        set("batchCount", batchCount)
         set("screenSize", simd_int2(Int32(screenSize.x), Int32(screenSize.y)))
         set("viewMatrix", viewMatrix)
         set("projectionMatrix", projectionMatrix)
@@ -60,15 +63,16 @@ open class CullProcessor: BaseComputeRasteriserProcessor {
         set("enableCLOD", enableCLOD ? 1 : 0)
     }
 
+    var isEncodeReady: Bool {
+        batchCount > 0
+            && batchesBuffer != nil
+            && filesBuffer != nil
+            && visibleBuffer != nil
+            && counterBuffer != nil
+    }
+
     open override func update(_ commandBuffer: MTLCommandBuffer, iterations: Int = 1) {
-        encodeIfReady(
-            commandBuffer,
-            isReady: batchCount > 0
-                && batchesBuffer != nil
-                && filesBuffer != nil
-                && visibleBuffer != nil
-                && counterBuffer != nil
-        )
+        encodeIfReady(commandBuffer, isReady: isEncodeReady)
     }
 
 #if os(macOS) || os(iOS) || os(visionOS)
