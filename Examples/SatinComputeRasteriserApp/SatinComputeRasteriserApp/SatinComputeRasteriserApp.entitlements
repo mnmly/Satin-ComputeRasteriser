@@ -9,6 +9,18 @@
 	<true/>
 
 	<!--
+	  Datasets passed via launch arguments (`--ply` / `--copc`, used to drive
+	  GPU-capture sessions) carry no user-selection grant, so the sandbox
+	  denies reading them and the COPC open fails. This read-only exception
+	  (scoped to external volumes, where the capture datasets live) keeps the
+	  sandbox on — writes stay confined — while letting launch-arg paths load.
+	-->
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/Volumes/</string>
+	</array>
+
+	<!--
 	  PDAL/GDAL ships its xcframework with embedded dylibs (libodbcinst,
 	  libproj, libsqlite3, …) signed by upstream / ad-hoc, with a Team ID
 	  that doesn't match this app. Hardened runtime's library validation

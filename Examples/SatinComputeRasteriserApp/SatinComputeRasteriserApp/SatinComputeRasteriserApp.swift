@@ -8,6 +8,7 @@ struct SatinComputeRasteriserApp: App {
     init() {
         renderer = ComputeRasteriserAppRenderer(
             initialPLYURL: Self.plyURL(from: CommandLine.arguments),
+            initialCOPCURLs: Self.copcURLs(from: CommandLine.arguments),
             initialMode: Self.mode(from: CommandLine.arguments)
         )
     }
@@ -34,6 +35,29 @@ struct SatinComputeRasteriserApp: App {
             return URL(fileURLWithPath: path)
         }
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(path)
+    }
+
+    /// Every repeatable `--copc <path>` pair, resolved to a file URL. Paths
+    /// that don't exist are skipped (one log line each) so a capture launched
+    /// with `--copc a --copc b --copc c` degrades gracefully.
+    private static func copcURLs(from arguments: [String]) -> [URL] {
+        var urls: [URL] = []
+        var index = 0
+        while index < arguments.count {
+            defer { index += 1 }
+            guard arguments[index] == "--copc", arguments.indices.contains(index + 1) else { continue }
+            index += 1
+            let path = arguments[index]
+            let url = path.hasPrefix("/")
+                ? URL(fileURLWithPath: path)
+                : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                urls.append(url)
+            } else {
+                print("[SatinComputeRasteriserApp] --copc: skipping missing file \(url.path)")
+            }
+        }
+        return urls
     }
 
     private static func mode(from arguments: [String]) -> ComputeRasteriserMode {

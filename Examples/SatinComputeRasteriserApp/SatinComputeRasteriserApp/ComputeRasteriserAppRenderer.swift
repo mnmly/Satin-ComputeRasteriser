@@ -72,8 +72,12 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
     private var currentViewport: SIMD2<Float> = SIMD2(800, 600)
 
     #if canImport(SwiftPDAL)
-    private var streamingAdapter: StreamingAdapter?
-    private var lastCOPCURL: URL?
+    // One StreamingAdapter / cloud per open COPC file. The rasteriser traverses
+    // and merges all clouds per frame, so concurrent streams "just work" — this
+    // exercises the merged multi-cloud dispatch path.
+    private var streamingAdapters: [StreamingAdapter] = []
+    private var streamingClouds: [ComputeRasteriserPointCloud] = []
+    private var lastCOPCURLs: [URL] = []
     #endif
     public lazy var camera = PerspectiveCamera(
         context: defaultContext,
@@ -85,6 +89,9 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
     public private(set) var cameraController: PerspectiveCameraController?
     public let appState: ComputeRasteriserAppState
     private let initialPLYURL: URL?
+    /// COPC files to auto-load on `setup()` (from repeatable `--copc <path>`
+    /// launch arguments). Loaded through the same path as the file importer.
+    private let initialCOPCURLs: [URL]
 
     // Depth-of-field passes (created in setup from embedded kernels).
     private var displacementPass: DisplacementPass?
@@ -107,10 +114,12 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
 
     public init(
         initialPLYURL: URL? = nil,
+        initialCOPCURLs: [URL] = [],
         initialMode: ComputeRasteriserMode = .highQualityAverage,
         appState: ComputeRasteriserAppState = ComputeRasteriserAppState()
     ) {
         self.initialPLYURL = initialPLYURL
+        self.initialCOPCURLs = initialCOPCURLs
         self.appState = appState
         self.appState.mode = initialMode
         let device = MTLCreateSystemDefaultDevice()!
@@ -148,16 +157,30 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
         if let initialPLYURL {
             loadPLY(url: initialPLYURL)
         }
+        #if canImport(SwiftPDAL)
+        if !initialCOPCURLs.isEmpty {
+            loadCOPC(urls: initialCOPCURLs)
+        }
+        #endif
     }
 
     open override func update() {
         cameraController?.update()
         #if canImport(SwiftPDAL)
-        if let adapter = streamingAdapter {
-            adapter.update(camera: camera, viewport: currentViewport)
-            DispatchQueue.main.async { [appState, chunks = adapter.residentChunks, points = adapter.residentPoints] in
+        if !streamingAdapters.isEmpty {
+            var chunks = 0
+            var points = 0
+            var firstError: String?
+            for adapter in streamingAdapters {
+                adapter.update(camera: camera, viewport: currentViewport)
+                chunks += adapter.residentChunks
+                points += adapter.residentPoints
+                if firstError == nil { firstError = adapter.lastError }
+            }
+            DispatchQueue.main.async { [appState, chunks, points, firstError] in
                 appState.streamingChunks = chunks
                 appState.streamingPoints = points
+                if let firstError { appState.errorMessage = firstError }
             }
         }
         #endif
@@ -212,78 +235,134 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
     }
 
     #if canImport(SwiftPDAL)
-    /// Open a COPC LAZ file as a streaming source, swap the rendered cloud,
-    /// and frame the camera to its bounds. The previous (PLY/fixture) cloud
-    /// is removed from the rasteriser.
+    /// Convenience single-file entry point — loads `url` as a one-element set.
     public func loadCOPC(url: URL) {
-        let budgetBytes = max(64, appState.streamingBudgetMB) * 1024 * 1024
+        loadCOPC(urls: [url])
+    }
+
+    /// Open one or more COPC LAZ files, each as its own streaming source /
+    /// cloud / adapter, all added to the scene. Replaces whatever set is
+    /// currently loaded (the previous streams and the PLY/fixture cloud are
+    /// torn down first). The `streamingBudgetMB` total is split equally across
+    /// the N sources so aggregate memory stays comparable to the single-file
+    /// case, and the camera frames to the first source's bounds.
+    public func loadCOPC(urls: [URL]) {
+        guard !urls.isEmpty else { return }
         Task.detached { [weak self] in
             guard let self else { return }
-            let shouldStop = url.startAccessingSecurityScopedResource()
-            defer {
-                if shouldStop { url.stopAccessingSecurityScopedResource() }
+            // Tear down the existing set and split the budget on the main actor
+            // before any source opens, so installs only ever append.
+            let (perSourceBytes, residency) = await MainActor.run { () -> (Int, StreamingResidencyChoice) in
+                let totalBytes = max(64, self.appState.streamingBudgetMB) * 1024 * 1024
+                let perSourceBytes = max(1, totalBytes / urls.count)
+                self.lastCOPCURLs = urls
+                self.teardownStreamingSet()
+                self.appState.status = urls.count == 1
+                    ? urls[0].lastPathComponent
+                    : "\(urls[0].lastPathComponent) +\(urls.count - 1)"
+                self.appState.errorMessage = nil
+                self.appState.isStreaming = true
+                self.appState.streamingChunks = 0
+                self.appState.streamingPoints = 0
+                return (perSourceBytes, self.appState.streamingResidency)
             }
-            do {
-                // 1.2.0: parallel decode via reader pool + faster ticks.
-                // decodeConcurrency = active core count; LAZ decompress is
-                // single-threaded per chunk so going past cores doesn't help.
-                let cores = max(2, ProcessInfo.processInfo.activeProcessorCount)
-                let policy: SwiftPDAL.ResidencyPolicy =
-                    (await MainActor.run { self.appState.streamingResidency }) == .distance
-                    ? .distanceOnly : .frustumFirstThenHalo
-                let opts = StreamingOptions(
-                    maxInFlightLoads: cores * 2,
-                    decodeConcurrency: cores,
-                    driverTickInterval: .milliseconds(16),
-                    residencyPolicy: policy
-                )
-                let source = try await SwiftPDAL.CopcStreamingPointCloudSource.open(url, options: opts)
-                source.setBudget(budgetBytes)
-                await MainActor.run {
-                    self.lastCOPCURL = url
-                    self.installStreamingSource(source, url: url, budgetBytes: budgetBytes)
+            await withTaskGroup(of: Void.self) { group in
+                for url in urls {
+                    group.addTask {
+                        await self.openAndInstall(
+                            url: url, budgetBytes: perSourceBytes,
+                            residency: residency, cloudCount: urls.count
+                        )
+                    }
                 }
-            } catch {
-                await MainActor.run {
-                    self.appState.errorMessage = "COPC open failed: \(error.localizedDescription)"
-                }
+            }
+        }
+    }
+
+    private func openAndInstall(url: URL, budgetBytes: Int, residency: StreamingResidencyChoice, cloudCount: Int) async {
+        let shouldStop = url.startAccessingSecurityScopedResource()
+        defer {
+            if shouldStop { url.stopAccessingSecurityScopedResource() }
+        }
+        do {
+            // 1.2.0: parallel decode via reader pool + faster ticks.
+            // decodeConcurrency = active core count; LAZ decompress is
+            // single-threaded per chunk so going past cores doesn't help.
+            let cores = max(2, ProcessInfo.processInfo.activeProcessorCount)
+            let policy: SwiftPDAL.ResidencyPolicy =
+                residency == .distance ? .distanceOnly : .frustumFirstThenHalo
+            let opts = StreamingOptions(
+                maxInFlightLoads: cores * 2,
+                decodeConcurrency: cores,
+                driverTickInterval: .milliseconds(16),
+                residencyPolicy: policy
+            )
+            let source = try await SwiftPDAL.CopcStreamingPointCloudSource.open(url, options: opts)
+            source.setBudget(budgetBytes)
+            await MainActor.run {
+                self.installStreamingSource(source, url: url, budgetBytes: budgetBytes, cloudCount: cloudCount)
+            }
+        } catch {
+            // Also log to stdout — the HUD isn't visible when the app is
+            // driven by launch arguments for capture sessions.
+            print("[SatinComputeRasteriserApp] COPC open failed for \(url.path): \(error)")
+            await MainActor.run {
+                self.appState.errorMessage = "COPC open failed (\(url.lastPathComponent)): \(error.localizedDescription)"
             }
         }
     }
 
     public func setStreamingBudget(MB: Int) {
-        let bytes = max(64, MB) * 1024 * 1024
         DispatchQueue.main.async { [appState] in appState.streamingBudgetMB = MB }
-        streamingAdapter?.setBudget(bytes: bytes)
+        // The slider means "total across all clouds" — split equally.
+        let totalBytes = max(64, MB) * 1024 * 1024
+        let perSourceBytes = max(1, totalBytes / max(1, streamingAdapters.count))
+        for adapter in streamingAdapters { adapter.setBudget(bytes: perSourceBytes) }
     }
 
-    /// Switching residency policy requires re-opening the source — the
-    /// driver reads the policy at construction. Re-opens the same URL with
+    /// Switching residency policy requires re-opening the sources — the
+    /// driver reads the policy at construction. Re-opens the current set with
     /// the new choice; ~100 ms hiccup while the hierarchy is rescanned.
     public func setResidency(_ choice: StreamingResidencyChoice) {
         DispatchQueue.main.async { [appState] in appState.streamingResidency = choice }
-        if let url = lastCOPCURL {
-            loadCOPC(url: url)
+        if !lastCOPCURLs.isEmpty {
+            loadCOPC(urls: lastCOPCURLs)
         }
     }
 
+    /// Close every adapter, remove every streaming cloud (and the PLY/fixture
+    /// cloud on the first stream) from the rasteriser, and reset the arrays.
+    /// `removePointCloud` is a no-op for a cloud that isn't a child, so the
+    /// belt-and-suspenders fixture removal is safe on repeat calls.
     @MainActor
-    private func installStreamingSource(_ source: SwiftPDAL.CopcStreamingPointCloudSource, url: URL, budgetBytes: Int) {
-        // Tear down the existing cloud + adapter.
-        streamingAdapter?.close()
-        streamingAdapter = nil
+    private func teardownStreamingSet() {
+        for adapter in streamingAdapters { adapter.close() }
+        streamingAdapters.removeAll()
+        for cloud in streamingClouds { rasteriser.removePointCloud(cloud) }
+        streamingClouds.removeAll()
         rasteriser.removePointCloud(pointCloud)
+    }
+
+    @MainActor
+    private func installStreamingSource(_ source: SwiftPDAL.CopcStreamingPointCloudSource, url: URL, budgetBytes: Int, cloudCount: Int) {
+        // The set was already torn down in `loadCOPC(urls:)`; this only appends.
+        let isFirst = streamingClouds.isEmpty
 
         // Pool capacity: cap by budget so we don't oversubscribe VRAM. 17 B/point
-        // × pointsPerBatch is the per-slot byte cost. Hard cap at 65536 slots
-        // (~11 GB at the SwiftPDAL default 10240 pts/batch) to keep the cull
-        // dispatch's per-frame threadgroup count bounded — every slot gets a
-        // threadgroup whether resident or not.
+        // × pointsPerBatch is the per-slot byte cost. The source's residency
+        // decider counts a chunk's *exact* point bytes against the budget, but
+        // every chunk occupies whole slots (its last batch is partial), so a
+        // pool sized 1:1 to the budget exhausts before the source stops
+        // admitting and the adapter drops chunks ("slot pool full"). 2× slot
+        // headroom absorbs that granularity waste. The 65536-slot ceiling
+        // keeps the cull dispatch's per-frame threadgroup count bounded —
+        // every slot gets a threadgroup whether resident or not — and is
+        // divided across the set so N clouds cost what one did.
         let pointsPerBatch = source.info.pointsPerBatch
         let bytesPerSlot = pointsPerBatch * 17
         let slotsByBudget = max(1, budgetBytes / max(1, bytesPerSlot))
         let cap = ComputeRasteriserCapacity(
-            maxResidentBatches: min(slotsByBudget, 65536),
+            maxResidentBatches: min(slotsByBudget * 2, 65536 / max(1, cloudCount)),
             pointsPerBatch: pointsPerBatch
         )
 
@@ -304,20 +383,20 @@ open class ComputeRasteriserAppRenderer: ViewRenderer, @unchecked Sendable {
             capacity: cap,
             label: "ComputeRasteriserPointCloud.Streaming"
         )
-        pointCloud = cloud
         rasteriser.addPointCloud(cloud)
+        streamingClouds.append(cloud)
 
         let adapter = StreamingAdapter(source: source, cloud: cloud)
-        streamingAdapter = adapter
+        streamingAdapters.append(adapter)
 
-        let shiftedMin = source.info.bounds.min - originShiftF
-        let shiftedMax = source.info.bounds.max - originShiftF
-        frameCamera(toBoundsMin: shiftedMin, boundsMax: shiftedMax)
-        appState.status = url.lastPathComponent
-        appState.errorMessage = nil
-        appState.isStreaming = true
-        appState.streamingChunks = 0
-        appState.streamingPoints = 0
+        // Frame to (and point DoF at) the first cloud of the set. Each dataset
+        // is pre-shifted to near-origin, so the others overlap it — fine here.
+        if isFirst {
+            pointCloud = cloud
+            let shiftedMin = source.info.bounds.min - originShiftF
+            let shiftedMax = source.info.bounds.max - originShiftF
+            frameCamera(toBoundsMin: shiftedMin, boundsMax: shiftedMax)
+        }
     }
     #endif
 

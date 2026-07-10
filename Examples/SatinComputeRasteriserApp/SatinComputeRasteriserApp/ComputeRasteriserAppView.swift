@@ -83,12 +83,12 @@ public struct ComputeRasteriserAppView: View {
         .fileImporter(
             isPresented: $isCOPCImporterPresented,
             allowedContentTypes: [.copcLAZ],
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { result in
             switch result {
             case let .success(urls):
-                if let url = urls.first {
-                    renderer.loadCOPC(url: url)
+                if !urls.isEmpty {
+                    renderer.loadCOPC(urls: urls)
                 }
             case let .failure(error):
                 appState.errorMessage = error.localizedDescription
