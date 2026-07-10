@@ -45,5 +45,17 @@ let package = Package(
             name: "SatinComputeRasteriserTests",
             dependencies: ["SatinComputeRasteriser"]
         ),
+        .testTarget(
+            name: "SatinComputeRasteriserStreamingTests",
+            dependencies: [
+                "SatinComputeRasteriser",
+                "SatinComputeRasteriserStreaming",
+                .product(name: "Satin", package: "Satin"),
+                .product(name: "SwiftPDAL", package: "SwiftPDAL"),
+            ],
+            swiftSettings: [
+                .interoperabilityMode(.Cxx),
+            ]
+        ),
     ]
 )

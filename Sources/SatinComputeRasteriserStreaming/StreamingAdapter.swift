@@ -29,6 +29,12 @@ public final class StreamingAdapter {
     public private(set) var residentChunks: Int = 0
     /// Sum of points across resident chunks (mirrors `cloud.pointCount`).
     public private(set) var residentPoints: Int = 0
+    /// Chunks that have been drained from the source but not yet uploaded to
+    /// the slot pool — the throttle carry-over plus any chunk parked by
+    /// back-pressure when the pool was full. The source's residency model
+    /// counts these as on-GPU, so a healthy adapter satisfies
+    /// `sourceBelievedResident == residentChunks + pendingUploadCount`.
+    internal var pendingUploadCount: Int { pendingAdds.count - pendingCursor }
     /// Last non-fatal error surfaced during ``update(camera:viewport:)`` —
     /// typically a "slot pool full" notice when the resident budget is
     /// undersized for what the scorer wants to bring in.
@@ -119,13 +125,30 @@ public final class StreamingAdapter {
         var uploaded = 0
         while uploaded < maxChunkUploadsPerTick, pendingCursor < pendingAdds.count {
             let chunk = pendingAdds[pendingCursor]
-            pendingCursor += 1
             let batches = chunk.batches.map(Self.toRasterBatch)
-            guard cloud.freeSlotCount >= batches.count else {
+            if cloud.freeSlotCount < batches.count {
+                // A chunk wider than the entire pool can never fit — that's a
+                // configuration error (the pool is smaller than a single
+                // chunk). Drop it permanently, otherwise it wedges the head of
+                // the queue forever and starves every chunk behind it.
+                if batches.count > cloud.batchCount {
+                    lastError = "chunk needs \(batches.count) slots but pool capacity is \(cloud.batchCount); raise maxResidentBatches"
+                    pendingCursor += 1
+                    continue
+                }
+                // The pool is merely full right now. Do NOT consume the chunk:
+                // leave it at the cursor so a future tick retries it once an
+                // eviction frees a slot, and stop draining this tick — nothing
+                // will free a slot until then, so burning the rest of the cap
+                // (and re-checking every queued chunk) is pointless. Dropping
+                // it here instead would strand the chunk permanently: the
+                // source's residency model already counts it on the GPU and
+                // won't re-emit it until the scorer evicts and re-admits it,
+                // leaving a hole in the cloud while the camera holds still.
                 lastError = "slot pool full (capacity \(cloud.batchCount)); raise budget or maxResidentBatches"
-                uploaded += 1
-                continue
+                break
             }
+            pendingCursor += 1
             let slots = cloud.addBatches(
                 positionsXYZLow: chunk.xyzLow,
                 positionsXYZMed: chunk.xyzMed,
@@ -165,6 +188,18 @@ public final class StreamingAdapter {
             fileIndex: s.fileIndex
         )
         b.state = s.state
+        // Carry the packed cumulative LOD level counts (padding3…6) through.
+        // SwiftPDAL stores each batch level-ascending and fills these so the
+        // cull kernel can bound its draw to a LOD threshold; dropping them
+        // leaves `cum[7] == 0`, the "unbucketed" sentinel, which forces every
+        // streamed chunk to a full-range draw and makes lodBias a no-op on
+        // streamed data. padding7/8 are copied too for layout fidelity.
+        b.padding3 = s.padding3
+        b.padding4 = s.padding4
+        b.padding5 = s.padding5
+        b.padding6 = s.padding6
+        b.padding7 = s.padding7
+        b.padding8 = s.padding8
         return b
     }
 }
