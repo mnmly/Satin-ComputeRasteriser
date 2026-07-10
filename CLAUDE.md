@@ -71,8 +71,9 @@ zero cost when unset.
 
 ## Conventions inherited from `~/.claude/CLAUDE.md`
 
-Working notes and per-task plans live in `tasks/todo.md` (per the user's
-global convention). Don't create planning/decision files outside that
-path unless explicitly asked. Don't add comments that just restate the
+Track tasks with the built-in task tools (`TaskCreate`/`TaskUpdate`), not
+files. `tasks/todo.md` is a frozen archive of past plans and measurement
+results — read it for history, don't extend it. Don't create
+planning/decision files unless explicitly asked. Don't add comments that just restate the
 code; reserve `///` for the documentation contract above and `//` for
 genuinely non-obvious *why*.
