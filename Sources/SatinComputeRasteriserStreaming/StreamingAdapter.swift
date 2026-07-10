@@ -19,8 +19,11 @@ public final class StreamingAdapter {
     private let cloud: ComputeRasteriserPointCloud
     private var slotsByChunk: [ChunkID: [Int]] = [:]
     /// Newly-streamed chunks awaiting upload, drained ``maxChunkUploadsPerTick``
-    /// at a time per ``update(camera:viewport:)`` call.
+    /// at a time per ``update(camera:viewport:)`` call. Consumed entries stay
+    /// in place behind ``pendingCursor`` and are compacted away lazily, so a
+    /// burst drain doesn't pay an O(n) `removeFirst` per chunk.
     private var pendingAdds: [ResidentChunk] = []
+    private var pendingCursor: Int = 0
 
     /// Number of chunks currently resident in the slot pool.
     public private(set) var residentChunks: Int = 0
@@ -77,7 +80,7 @@ public final class StreamingAdapter {
         source.submit(view: view)
 
         let delta = source.pollLatest()
-        guard delta != nil || !pendingAdds.isEmpty else { return }
+        guard delta != nil || pendingCursor < pendingAdds.count else { return }
 
         // Evictions first so freed slots are available for the new chunks.
         // Defer the GPU-side flush — one commitBatchUpdates() at the end
@@ -90,9 +93,17 @@ public final class StreamingAdapter {
                 if let slots = slotsByChunk.removeValue(forKey: id) {
                     slotsToFree.append(contentsOf: slots)
                 }
+            }
+            if !delta.removed.isEmpty {
                 // The GPU never saw a still-pending add for a chunk that got
                 // evicted before its turn — drop it rather than resurrect it.
-                pendingAdds.removeAll { $0.id == id }
+                // Compact first so the filter only sees unconsumed chunks.
+                if pendingCursor > 0 {
+                    pendingAdds.removeFirst(pendingCursor)
+                    pendingCursor = 0
+                }
+                let removedIDs = Set(delta.removed)
+                pendingAdds.removeAll { removedIDs.contains($0.id) }
             }
             if !slotsToFree.isEmpty {
                 cloud.removeBatches(slots: slotsToFree, commit: false)
@@ -106,8 +117,9 @@ public final class StreamingAdapter {
         // main-thread memcpy cost when a residency burst brings in dozens of
         // chunks at once.
         var uploaded = 0
-        while uploaded < maxChunkUploadsPerTick, !pendingAdds.isEmpty {
-            let chunk = pendingAdds.removeFirst()
+        while uploaded < maxChunkUploadsPerTick, pendingCursor < pendingAdds.count {
+            let chunk = pendingAdds[pendingCursor]
+            pendingCursor += 1
             let batches = chunk.batches.map(Self.toRasterBatch)
             guard cloud.freeSlotCount >= batches.count else {
                 lastError = "slot pool full (capacity \(cloud.batchCount)); raise budget or maxResidentBatches"
@@ -127,6 +139,13 @@ public final class StreamingAdapter {
             dirty = true
             uploaded += 1
         }
+        if pendingCursor == pendingAdds.count {
+            pendingAdds.removeAll(keepingCapacity: true)
+            pendingCursor = 0
+        } else if pendingCursor > 64, pendingCursor * 2 > pendingAdds.count {
+            pendingAdds.removeFirst(pendingCursor)
+            pendingCursor = 0
+        }
 
         if dirty { cloud.commitBatchUpdates() }
 
@@ -135,7 +154,7 @@ public final class StreamingAdapter {
     }
 
     /// Closes the underlying source. Idempotent on the source side.
-    public func close() { pendingAdds.removeAll(); source.close() }
+    public func close() { pendingAdds.removeAll(); pendingCursor = 0; source.close() }
 
     private static func toRasterBatch(_ s: StreamingRasterBatch) -> RasterBatch {
         var b = RasterBatch(

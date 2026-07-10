@@ -165,6 +165,10 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// in one shot. Empty slots have `state == 0` and do not contribute to
     /// ``pointCount`` / ``residentBatchCount``.
     private var batchMirror: [RasterBatch]
+    /// Inclusive slot range mutated since the last ``flushBatchMirror()``;
+    /// empty (`lo > hi`) means the GPU buffer is up to date.
+    private var dirtySlotLo: Int = .max
+    private var dirtySlotHi: Int = -1
     /// LIFO of free slot indices. Newest-freed wins so cache lines stay warm.
     private var freeSlots: [Int]
 
@@ -297,6 +301,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         freeSlots = (numBatches ..< capacity.maxResidentBatches).reversed()
         residentBatchCount = numBatches
         self.pointCount = pointCount
+        markAllSlotsDirty()
         flushBatchMirror()
         return numBatches
     }
@@ -310,6 +315,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         let n = min(numBatches, capacity.maxResidentBatches)
         let ptr = batchesBuffer.contents().bindMemory(to: RasterBatch.self, capacity: n)
         for slot in 0 ..< n { batchMirror[slot] = ptr[slot] }
+        markSlotsDirty(0 ..< n)
     }
 
     /// Reserve a **contiguous** run of `n` free slots for a GPU chunk pack,
@@ -331,6 +337,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
                 let reserved = Set(s ..< (s + n))
                 freeSlots.removeAll { reserved.contains($0) }
                 for slot in s ..< (s + n) { batchMirror[slot].state = 1 }
+                markSlotsDirty(s ..< (s + n))
                 return s
             }
             s += k + 1 // slot s+k is occupied → next possible run starts past it
@@ -349,6 +356,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             for slot in firstSlot ..< min(firstSlot + numBatches, capacity.maxResidentBatches) {
                 batchMirror[slot] = ptr[slot]
             }
+            markSlotsDirty(firstSlot ..< min(firstSlot + numBatches, capacity.maxResidentBatches))
         }
         residentBatchCount += numBatches
         pointCount += count
@@ -364,6 +372,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         freeSlots = (0 ..< capacity.maxResidentBatches).reversed()
         residentBatchCount = 0
         pointCount = 0
+        markAllSlotsDirty()
         flushBatchMirror()
     }
 
@@ -395,9 +404,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     ///   `false` when making many sequential calls (e.g. draining a
     ///   streaming source's per-frame delta) and call
     ///   ``commitBatchUpdates()`` once at the end — the per-call upload
-    ///   is `maxResidentBatches × 64 B` regardless of how many slots
-    ///   actually changed, so coalescing is a clear win at large pool
-    ///   sizes.
+    ///   covers the contiguous slot range dirtied since the last flush,
+    ///   so coalescing still wins when adds land in scattered slots.
     @discardableResult
     public func addBatches(
         positionsXYZLow: Data,
@@ -433,6 +441,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             slotBatch.firstPoint = UInt32(dstFirstPoint)
             slotBatch.state = 1
             batchMirror[slot] = slotBatch
+            markSlotDirty(slot)
 
             residentBatchCount += 1
             pointCount += count
@@ -457,6 +466,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
             residentBatchCount -= 1
             batchMirror[slot].state = 0
             batchMirror[slot].numPoints = 0
+            markSlotDirty(slot)
             freeSlots.append(slot)
         }
         if commit { flushBatchMirror() }
@@ -466,9 +476,8 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
     /// ``batchesBuffer``. Use after a series of `commit: false`
     /// add/remove calls to publish all changes in one shot.
     ///
-    /// Cheap to call when nothing changed (a single memcpy of
-    /// `maxResidentBatches × 64 B`). For 65K-slot pools coalescing
-    /// avoids ~4 MB of redundant traffic per per-chunk add/remove.
+    /// Only the contiguous slot range dirtied since the last flush is
+    /// copied; a no-op when nothing changed.
     public func commitBatchUpdates() {
         flushBatchMirror()
     }
@@ -530,6 +539,7 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
 
         let batchesByteCount = capacity.maxResidentBatches * MemoryLayout<RasterBatch>.stride
         batchesBuffer = makeEmptyBuffer(length: batchesByteCount, label: "\(label).Batches")
+        markAllSlotsDirty()
         flushBatchMirror()
 
         rebuildFilesBuffer()
@@ -601,11 +611,35 @@ public final class ComputeRasteriserPointCloud: Object, @unchecked Sendable {
         return buffer
     }
 
+    private func markSlotDirty(_ slot: Int) {
+        if slot < dirtySlotLo { dirtySlotLo = slot }
+        if slot > dirtySlotHi { dirtySlotHi = slot }
+    }
+
+    private func markSlotsDirty(_ range: Range<Int>) {
+        guard !range.isEmpty else { return }
+        markSlotDirty(range.lowerBound)
+        markSlotDirty(range.upperBound - 1)
+    }
+
+    private func markAllSlotsDirty() {
+        markSlotsDirty(0 ..< batchMirror.count)
+    }
+
     private func flushBatchMirror() {
-        guard let batchesBuffer else { return }
-        let byteCount = min(batchesBuffer.length, batchMirror.count * MemoryLayout<RasterBatch>.stride)
+        guard let batchesBuffer, dirtySlotLo <= dirtySlotHi else { return }
+        let stride = MemoryLayout<RasterBatch>.stride
+        let lo = max(0, dirtySlotLo)
+        let hi = min(dirtySlotHi, batchMirror.count - 1, batchesBuffer.length / stride - 1)
+        dirtySlotLo = .max
+        dirtySlotHi = -1
+        guard lo <= hi else { return }
+        let byteOffset = lo * stride
+        let byteCount = (hi - lo + 1) * stride
         batchMirror.withUnsafeBytes { bytes in
-            batchesBuffer.contents().copyMemory(from: bytes.baseAddress!, byteCount: byteCount)
+            batchesBuffer.contents()
+                .advanced(by: byteOffset)
+                .copyMemory(from: bytes.baseAddress!.advanced(by: byteOffset), byteCount: byteCount)
         }
     }
 

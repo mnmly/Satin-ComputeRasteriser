@@ -122,6 +122,50 @@ private func makeContext() throws -> Context {
     #expect(reused == [slots[0]])
 }
 
+@Test func deferredCommitFlushesOnlyDirtySlots() throws {
+    let context = try makeContext()
+    let cap = ComputeRasteriserCapacity(maxResidentBatches: 8, pointsPerBatch: 8)
+    let cloud = ComputeRasteriserPointCloud(context: context, capacity: cap)
+
+    let positions = [UInt32](repeating: 0, count: 8)
+    let dataLow = Data(bytes: positions, count: 32)
+    let levels = Data(repeating: 0, count: 8)
+    let batches = (0 ..< 8).map { _ in
+        RasterBatch(min: .zero, max: .one, numPoints: 4, firstPoint: 0, fileIndex: 0)
+    }
+    let slots = cloud.addBatches(
+        positionsXYZLow: dataLow, positionsXYZMed: dataLow, positionsXYZHigh: dataLow,
+        colors: dataLow, levels: levels, batches: batches, commit: false
+    )
+    #expect(slots == Array(0 ..< 8))
+
+    // commit: false defers the GPU-visible upload until commitBatchUpdates().
+    var mirror = readBatchMirror(buffer: cloud.batchesBuffer!, count: 8)
+    #expect(mirror.allSatisfy { $0.state == 0 })
+
+    cloud.commitBatchUpdates()
+    mirror = readBatchMirror(buffer: cloud.batchesBuffer!, count: 8)
+    #expect(mirror.allSatisfy { $0.state == 1 })
+
+    // Sparse dirty range: only slot 6 changes; neighbors must survive the flush.
+    cloud.removeBatches(slots: [6], commit: false)
+    cloud.commitBatchUpdates()
+    mirror = readBatchMirror(buffer: cloud.batchesBuffer!, count: 8)
+    #expect(mirror[6].state == 0)
+    #expect(mirror[6].numPoints == 0)
+    for slot in [0, 5, 7] {
+        #expect(mirror[slot].state == 1)
+        #expect(mirror[slot].numPoints == 4)
+        #expect(mirror[slot].firstPoint == UInt32(slot * 8))
+    }
+
+    // Nothing dirty → commit is a no-op that leaves the buffer intact.
+    cloud.commitBatchUpdates()
+    mirror = readBatchMirror(buffer: cloud.batchesBuffer!, count: 8)
+    #expect(mirror[6].state == 0)
+    #expect(mirror[7].state == 1)
+}
+
 @Test func legacyPackedInitFitsCapacityToBatchCount() throws {
     let context = try makeContext()
     let packed = PackedPointCloudFixtures.cubeGrid(pointsPerAxis: 8)   // 512 points
